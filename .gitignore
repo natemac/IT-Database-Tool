@@ -1,0 +1,6 @@
+output/
+tmp/
+__pycache__/
+app/*
+!app/DatabaseInfo.json
+*.log

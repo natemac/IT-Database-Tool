@@ -1,0 +1,10 @@
+Info courtesy of Eggmansworld, creator of the Incredible Technologies
+Super Easy Universal Setup Guide and maintainer of tp-it-guides.
+
+GitHub: https://github.com/Eggmansworld/tp-it-guides
+Installer release: https://github.com/Eggmansworld/tp-it-guides/releases/tag/universal-guide
+
+The app's PostgreSQL 8.3 walkthrough is adapted from the guide supplied
+by the user, dated 2026-10-07 (installation pages 2-5).
+The original guide and installer are the work of their respective authors.
+This tool supplies its own guided interface and database management code.

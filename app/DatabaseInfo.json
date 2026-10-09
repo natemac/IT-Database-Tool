@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 1,
+  "connection": {
+    "server": "127.0.0.1",
+    "port": 5432,
+    "username": "postgres",
+    "password": "",
+    "pgBin": null
+  },
+  "games": [
+    {
+      "game": "Golden Tee Live 2006",
+      "database": "GameDB06",
+      "encoding": "SQL_ASCII",
+      "backup": "2017-12-18/1922-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2006",
+      "sha256": "4553357b61739e5455ef45ca71b6afba6d47afbf061d68d5490ada7efd8f4bba",
+      "restoreProfile": "it-category-keys-v1",
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2007",
+      "database": "GameDB07",
+      "encoding": "SQL_ASCII",
+      "backup": "2017-12-18/2043-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2007",
+      "sha256": "b22d71cb316200b351369037faab78e92d9ceea23048be5d1430f326d6e31f4a",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2008",
+      "database": "GameDB08",
+      "encoding": "SQL_ASCII",
+      "backup": "2016-01-30/1850-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2008",
+      "sha256": "05bd910656e6a0ee7cf03c08bca1f2223275973076bbd5a6132d20fad597fd8f",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2009",
+      "database": "GameDB09",
+      "encoding": "SQL_ASCII",
+      "backup": "2015-07-27/2035-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2009",
+      "sha256": "61648d2476ceb8023b58d4ab6a630129585ddc3bc0e708ba5b0dae89a944a0a8",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2010",
+      "database": "GameDB10",
+      "encoding": "SQL_ASCII",
+      "backup": "2017-12-06/1442-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2010",
+      "sha256": "d545a0ef00b5391e2a316c791c7219a2eed5e723ea8819f66c2077745cb73cf2",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2011",
+      "database": "GameDB11",
+      "encoding": "SQL_ASCII",
+      "backup": "2017-12-06/1621-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2011",
+      "sha256": "3310c9e2114076a61c63a9636311f7fe9b54c4b9128f59c032521f04ab54cd25",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2012",
+      "database": "GameDB12",
+      "encoding": "SQL_ASCII",
+      "backup": "2025-03-22/1826-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2012",
+      "sha256": "ae3f43a632ec3d70ddb91bd5a29cd16019bb00d9721961f63847058f7032dfd4",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2013",
+      "database": "GameDB13",
+      "encoding": "SQL_ASCII",
+      "backup": "2025-03-22/1920-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2013",
+      "sha256": "0c4f59d0a8143e31088c1d51089dd34a3a6b2f691fb23c5c0f9f8b369583fbb4",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2014",
+      "database": "GameDB14",
+      "encoding": "SQL_ASCII",
+      "backup": "2018-01-29/2202-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2014",
+      "sha256": "80c6d245b71c7479ccfb40a8fb3bd649294e0960b052ef776ce0b14c507241c3",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2015",
+      "database": "GameDB15",
+      "encoding": "SQL_ASCII",
+      "backup": "2018-01-30/0206-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2015",
+      "sha256": "c55c69c883f4d5eec098261d6c7a9947d2c62957aab2fd89baa222e0f8121bc5",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2016",
+      "database": "GameDB16",
+      "encoding": "SQL_ASCII",
+      "backup": "2018-01-07/1942-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2016",
+      "sha256": "55ecdfce3e949e70e5342d57d8742fe7e01bdc52ce22c85eb667eca4150f5979",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2017",
+      "database": "GameDB17",
+      "encoding": "SQL_ASCII",
+      "backup": "2018-01-30/0241-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2017",
+      "sha256": "20112a6008fb5cbf40c5a399a314960393f41153d77a4b53c8d50a4bb8cba32f",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2018",
+      "database": "GameDB18",
+      "encoding": "SQL_ASCII",
+      "backup": "2018-06-21/1942-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2018",
+      "sha256": "633cf0c1d76e9e93cccbb32081310b01d27634ed7dc4639c4eb980ad023118b8",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2019",
+      "database": "GameDB19",
+      "encoding": "SQL_ASCII",
+      "backup": "2025-05-20/1610-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2019",
+      "sha256": "eb88f547cc07cba6f0c33765dad03e567fe218b59a386c5dc3655f41cedb16d6",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Golden Tee Live 2020",
+      "database": "GameDB20",
+      "encoding": "SQL_ASCII",
+      "backup": "2025-05-10/2228-postgresql_database-GameDB-backup",
+      "backupFolder": "Golden Tee Live 2020",
+      "sha256": "2fd7ac2d35f79c39b7ef71431197ddb582e1d00015e5296e4a325a53b7d52356",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Orange County Choppers Pinball",
+      "database": "GameDBOCC",
+      "encoding": "SQL_ASCII",
+      "backup": "2020-09-12/1549-postgresql_database-GameDB-backup",
+      "backupFolder": "Orange County Choppers Pinball",
+      "sha256": "be6e1e2895ad3242ab7ce1dd344834bf35b0756dce41a5d3bd6e91b270025772",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Power Putt Live 2012",
+      "database": "GAMEDBPP12",
+      "encoding": "SQL_ASCII",
+      "backup": "1433-postgresql_database-GameDB-backup",
+      "backupFolder": "Power Putt Live 2012",
+      "sha256": "301fde1038b00a56dfd46c9813935aadb3723e3743cd9f27e310710d2eb769e5",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Power Putt Live 2013",
+      "database": "GAMEDBPP13",
+      "encoding": "SQL_ASCII",
+      "backup": "2023-10-27/2042-postgresql_database-GameDB-backup",
+      "backupFolder": "Power Putt Live 2013",
+      "sha256": "a7dd8463b81052ac458c522d499895011737bada959c832e6a1eaa11b1f96bb5",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Silver Strike Bowling Live",
+      "database": "GameDBSSB",
+      "encoding": "SQL_ASCII",
+      "backup": "2024-10-12/2222-postgresql_database-GameDB-backup",
+      "backupFolder": "Silver Strike Bowling Live",
+      "sha256": "47a4427f44aa155cda8fb178e2576bfc13a8302652878f6f6d55970b229838c0",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Target Toss Pro Bags",
+      "database": "GameDBBags",
+      "encoding": "SQL_ASCII",
+      "backup": "2017-11-16/0136-postgresql_database-GameDB-backup",
+      "backupFolder": "Target Toss Pro Bags",
+      "sha256": "5ff293b51cdfa58a3f220ced491ac0653e34148791a35521d8339f074ec75c3e",
+      "restoreProfile": null,
+      "databaseFile": null
+    },
+    {
+      "game": "Target Toss Pro Lawn Darts & Bags",
+      "database": "GameDBLawndarts",
+      "encoding": "SQL_ASCII",
+      "backup": "2017-05-28/2104-postgresql_database-GameDB-backup",
+      "backupFolder": "Target Toss Pro Lawn Darts & Bags",
+      "sha256": "23ffacf4bcf44a0973701ce614eff5023259d689321dfa01b092b0502dec5fc2",
+      "restoreProfile": null,
+      "databaseFile": null
+    }
+  ]
+}
