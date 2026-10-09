@@ -2,6 +2,20 @@
 
 A Windows app for setting up PostgreSQL 8.3 and managing Incredible Technologies game databases.
 
+## Screenshots
+
+Manage game databases and see which files are ready to install.
+
+![IT Database Tool main window](docs/screenshots/main-window.jpg)
+
+Follow the included PostgreSQL setup guide.
+
+![PostgreSQL first-time setup guide](docs/screenshots/postgresql-setup.jpg)
+
+Review the basics from the welcome screen.
+
+![Welcome and app basics](docs/screenshots/welcome.jpg)
+
 ## Download and run
 
 1. Download **IT-Database-Setup.zip** from [Releases](https://github.com/natemac/IT-Database-Tool/releases/latest).
