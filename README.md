@@ -15,7 +15,7 @@ Game database archives are not included. Extract downloaded packs first. Add/Aut
 
 ## Your database library
 
-![Database library with backup dates and the latest backup file](docs/screenshots/main-window.jpg)
+![Database library with backup dates and the latest backup file](docs/screenshots/main-window.png)
 
 Checkboxes control **Install selected** and **Selected actions**. Ctrl/Shift-click highlights rows for the right-click or **Database actions** menu. An action is greyed out unless every highlighted game qualifies. Row and file-column clicks only select rows.
 
@@ -57,7 +57,7 @@ The download includes the legacy PostgreSQL 8.3 / pgAdmin III installer used by 
 
 ![PostgreSQL installation guide](docs/screenshots/postgresql-setup.jpg)
 
-Screenshots use example library data.
+The library screenshot is user-provided; the other screenshots use example data.
 
 ## Build and checks
 
@@ -68,3 +68,4 @@ Run `python src/test_auto_load_files.py` and `python src/test_bundled_installer.
 ## Credits
 
 Info courtesy of [Eggmansworld](https://github.com/Eggmansworld/tp-it-guides), creator of the Incredible Technologies Super Easy Universal Setup Guide. [Original guide and installer release](https://github.com/Eggmansworld/tp-it-guides/releases/tag/universal-guide). Third-party installers remain the work of their respective authors.
+
