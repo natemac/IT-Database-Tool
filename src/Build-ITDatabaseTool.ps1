@@ -6,7 +6,7 @@ $compiler=Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
 [IO.Directory]::CreateDirectory($destination) | Out-Null
 if (!$PackageOnly) {
 if (!(Test-Path -LiteralPath $compiler)) { throw '.NET Framework 4 compiler was not found on this PC.' }
-& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.ServiceProcess.dll ('/out:'+(Join-Path $destination 'IT Database Builder.exe')) (Join-Path $PSScriptRoot 'ITDatabaseTool.cs')
+& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.ServiceProcess.dll ('/out:'+(Join-Path $destination 'IT Database Builder.exe')) (Join-Path $PSScriptRoot 'ITDatabaseTool.cs') (Join-Path $PSScriptRoot 'ITDatabaseUi.cs') (Join-Path $PSScriptRoot 'ITDatabaseInitialBackup.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Database builder compilation failed.' }
 } elseif (!(Test-Path -LiteralPath (Join-Path $destination 'IT Database Builder.exe'))) { throw 'Build the EXE before packaging it.' }
 foreach ($name in @('README.txt','CREDITS.txt','Setup-ITDatabases.ps1')) {
@@ -24,7 +24,10 @@ $shareableDefinition=Get-Content -LiteralPath $definition -Raw | ConvertFrom-Jso
 $shareableDefinition.PSObject.Properties.Remove('connection')
 # UserSettings.json is created with blank defaults on first run. Never bundle
 # it: extracting an update must not replace a user's connection or preferences.
-foreach($game in $shareableDefinition.games) { $game | Add-Member -NotePropertyName databaseFile -NotePropertyValue $null -Force }
+foreach($game in $shareableDefinition.games) {
+    if($game.databaseFile) { $game | Add-Member -NotePropertyName sha256 -NotePropertyValue $null -Force }
+    $game | Add-Member -NotePropertyName databaseFile -NotePropertyValue $null -Force
+}
 $packageJson=$shareableDefinition | ConvertTo-Json -Depth 20
 [IO.File]::WriteAllText((Join-Path $stage 'DatabaseInfo.json'),$packageJson,[Text.UTF8Encoding]::new($false))
 [IO.Directory]::CreateDirectory((Join-Path $stage 'PG_backup')) | Out-Null

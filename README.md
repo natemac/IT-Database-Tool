@@ -1,54 +1,70 @@
-# IT Database Tool
+# IT Database Tool v1.2.0
 
-A Windows app for setting up PostgreSQL 8.3 and managing Incredible Technologies game databases.
-
-## Screenshots
-
-Manage game databases and see which files are ready to install.
-
-![IT Database Tool main window](docs/screenshots/main-window.jpg)
-
-Follow the included PostgreSQL setup guide.
-
-![PostgreSQL first-time setup guide](docs/screenshots/postgresql-setup.jpg)
-
-Review the basics from the welcome screen.
-
-![Welcome and app basics](docs/screenshots/welcome.jpg)
+A Windows app for setting up PostgreSQL 8.3 and managing Incredible Technologies game databases, saved progress and backups.
 
 ## Download and run
 
-1. Download **IT-Database-Setup.zip** from [Releases](https://github.com/natemac/IT-Database-Tool/releases/latest).
-2. Extract the whole ZIP and open **IT Database Builder.exe**.
-3. If needed, use **PostgreSQL / pgAdmin setup** for the guided first-time installation.
+1. Download **IT-Database-Setup.zip** from [the latest release](https://github.com/natemac/IT-Database-Tool/releases/latest).
+2. Extract the entire ZIP and open **IT Database Builder.exe**.
+3. If PostgreSQL is missing, use **Help > PostgreSQL / pgAdmin setup**.
 4. Enter your database password and click **Connect**.
-5. Add a database file or use **Auto-Find database files** to search your games folder.
-6. Check your games and choose **Install**, **Clean install**, or **Remove**.
+5. Use **Add files** to select archives or Auto-Find them in your games folder.
+6. Check games and click **Install selected**.
 
-Game database files are not included. The app uses files where you select them, without copying, moving, or renaming them. Extract downloaded database archives first.
+Game database archives are not included. Extract downloaded packs first. Add/Auto-Find remembers files in place; a successful first install separately copies its original archive into your backup folder.
 
-**Install** skips existing databases. **Clean install** requires confirmation and keeps the previous database as a recovery database. **Remove** requires confirmation and deletes the selected installed databases.
+## Your database library
 
-Your database connection and password are saved locally in `UserSettings.json`. New users start with a blank password. This private settings file is never included in downloads; keep your own copy private.
+![Database library with backup dates and the latest backup file](docs/screenshots/main-window.jpg)
 
-## Database list
+Checkboxes control **Install selected** and **Selected actions**. Ctrl/Shift-click highlights rows for the right-click or **Database actions** menu. An action is greyed out unless every highlighted game qualifies. Row and file-column clicks only select rows.
 
-`DatabaseInfo.json` is the editable game list. Use **Open Database List**, **Add game**, or **Edit game** in the app to maintain it. Updating this list leaves your connection and preferences in `UserSettings.json` unchanged. Install the matching updated app when upgrading from v1.0.0; existing connection fields migrate automatically. Updating this list leaves your connection and preferences in `UserSettings.json` unchanged. Install the matching updated app when upgrading from v1.0.0; existing connection fields migrate automatically.
+**Install** adds missing databases. **Clean Install from source** uses the **Install source** shown in Properties; the table displays the **latest backup**, falling back to the source when there is no backup history. The confirmation names the files it will use. **Remove** deletes installed databases and their saved progress after confirmation.
 
-The download includes the PostgreSQL 8.3 / pgAdmin III installer. PostgreSQL 8.3 is a legacy version for these games.
+## Back up and restore
 
-## Build from source
+**Backup databases** saves every installed game. Use checked or highlighted actions for a smaller group. **Backed up** shows Never or the last backup date on the current connection.
 
-On Windows with .NET Framework 4:
+Backups use `pg_backup/YYYY-MM-DD/GameName_YYMMDD_DBbackup`, such as `pg_backup/2026-10-09/GoldenTee2020_261009_DBbackup`. Kept versions add `_2`, `_3`, and so on. If a backup exists, choose **Keep versions**, **Overwrite latest**, or **Cancel**. A selected restore source is protected from overwrite; keep another version instead.
 
-1. Extract the release ZIP into the repository's `app` folder to supply the bundled installers.
-2. In PowerShell run `./src/Build-ITDatabaseTool.ps1`.
-3. The rebuilt app is in `app`; the shareable ZIP is in `output`.
+Right-click a game and choose **Restore backup** to select a saved version. **Initial database** identifies the original archive copied after its first successful installation.
 
-Optional checks: `python src/test_auto_load_files.py` and `python src/test_bundled_installer.py`. They do not restore game databases.
+![Choose a backup or the initial database to restore](docs/screenshots/restore-backup.jpg)
+
+Restoring an installed database requires confirmation and keeps its previous database as a recovery copy. Backups are verified before use; failed staged restores preserve the installed database. Close games and pgAdmin connections before restoring or removing databases.
+
+Properties lists each version, date, size, filename and availability. Right-click a history row to **Restore** or **Delete** it. Deletion asks first and removes that archive and history entry; the installed database and other versions remain.
+
+![Database properties and backup history](docs/screenshots/backup-properties.jpg)
+
+A backup date is a snapshot, not continuous protection. Back up again to capture later progress. Keep an additional copy elsewhere if you need protection against loss of this computer.
+
+## Settings and upgrades
+
+`DatabaseInfo.json` holds the editable game list and selected source files. Use **Library > Add game**, right-click **Edit game**, or **Library > Open Database List**.
+
+Connection fields, password, preferences and backup history stay locally in `UserSettings.json`. New users start with a blank password. Downloads exclude private settings, personal backups, reports and selected source paths/hashes.
+
+When upgrading, close the app and keep your `UserSettings.json` and `pg_backup` folder. Keep your existing `DatabaseInfo.json` if it contains custom games or source selections. Older connection fields migrate automatically.
+
+## Welcome and PostgreSQL setup
+
+Welcome shows the app version and GitHub link, and can be reopened from **Help**.
+
+![Welcome and app basics](docs/screenshots/welcome.jpg)
+
+The download includes the legacy PostgreSQL 8.3 / pgAdmin III installer used by these games. The setup guide walks through Services, installation, saving the database password and manually restarting Windows.
+
+![PostgreSQL installation guide](docs/screenshots/postgresql-setup.jpg)
+
+Screenshots use example library data.
+
+## Build and checks
+
+On Windows with .NET Framework 4, extract the release ZIP into `app` to supply the installers, then run `./src/Build-ITDatabaseTool.ps1` in PowerShell. It builds the EXE in `app` and the shareable ZIP in `output`.
+
+Run `python src/test_auto_load_files.py` and `python src/test_bundled_installer.py` for discovery, settings, UI and packaging checks without changing game databases. The native suite additionally requires private PostgreSQL test runtime/archive fixtures and uses only an isolated temporary server on port 15583.
 
 ## Credits
 
-Info courtesy of [Eggmansworld](https://github.com/Eggmansworld/tp-it-guides), creator of the Incredible Technologies Super Easy Universal Setup Guide.
-
-[Original guide and installer release](https://github.com/Eggmansworld/tp-it-guides/releases/tag/universal-guide). Third-party installers remain the work of their respective authors.
+Info courtesy of [Eggmansworld](https://github.com/Eggmansworld/tp-it-guides), creator of the Incredible Technologies Super Easy Universal Setup Guide. [Original guide and installer release](https://github.com/Eggmansworld/tp-it-guides/releases/tag/universal-guide). Third-party installers remain the work of their respective authors.

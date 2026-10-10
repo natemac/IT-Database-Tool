@@ -45,6 +45,11 @@ def main():
                     '/reference:'+str(EXE),'/out:'+str(probe),str(ROOT/'src/test_setup_guidance.cs')],check=True,capture_output=True)
     guidance=subprocess.run([str(probe),str(fixture)],check=True,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
     print(guidance.stdout.decode('utf-8-sig').strip())
+    history_probe=fixture/'BackupHistoryTest.exe'
+    subprocess.run([str(compiler),'/nologo','/target:exe','/reference:System.Web.Extensions.dll',
+                    '/reference:'+str(EXE),'/out:'+str(history_probe),str(ROOT/'src/test_backup_history.cs')],check=True,capture_output=True)
+    history=subprocess.run([str(history_probe),str(fixture)],check=True,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
+    print(history.stdout.decode('utf-8-sig').strip())
     source.pop('connection',None)
     (fixture/'DatabaseInfo.json').write_text(json.dumps(source),encoding='utf-8')
     missing=check(fixture,fixture/'missing-postgresql-tools')
@@ -63,13 +68,15 @@ def main():
     with zipfile.ZipFile(ROOT/'output/IT-Database-Setup.zip') as archive:
         assert 'UserSettings.json' not in archive.namelist()
         assert 'InstallHistory.json' not in archive.namelist()
+        assert [name for name in archive.namelist() if name.replace('\\','/').lower().startswith('pg_backup/')] == ['PG_backup/'], 'Shared ZIP must contain an empty backup folder only'
+        assert not any(name.lower().endswith(('.dump','.partial','backup-report.json')) for name in archive.namelist()), 'Personal backups and reports must stay private'
         for name in FILES:
             packed=archive.read('installs/PostgreSQL v8.3/'+name)
             assert hashlib.sha256(packed).digest()==hashlib.sha256((TOOL/'installs/PostgreSQL v8.3'/name).read_bytes()).digest()
         definition=json.loads(archive.read('DatabaseInfo.json').decode('utf-8-sig'))
         original=json.loads((TOOL/'DatabaseInfo.json').read_text(encoding='utf-8-sig'))
         assert 'connection' not in definition, 'Shared catalogue must not contain local connection settings'
-        expected_games=[dict(game, databaseFile=None) for game in original['games']]
+        expected_games=[dict(game, databaseFile=None, **({'sha256':None} if game.get('databaseFile') else {})) for game in original['games']]
         assert definition['games']==expected_games
         readme=archive.read('README.txt').decode('utf-8-sig')
         credits=archive.read('CREDITS.txt').decode('utf-8-sig')

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -15,6 +15,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
 
 namespace ITDatabaseSetup
 {
@@ -74,6 +77,7 @@ namespace ITDatabaseSetup
         public bool databaseNeedsRepair;
         public string databaseHealthDetail;
         public string databaseCheckWarning;
+        public string initialBackupError;
         public bool installVerified;
     }
     public sealed class Report
@@ -102,13 +106,19 @@ namespace ITDatabaseSetup
     internal sealed class ToolResult { public int code; public string output; public string error; }
     internal sealed class BackupChoiceException : Exception { public BackupChoiceException(string text):base(text){} }
     public sealed class UserSettings { public bool hideWelcome; public DefinitionConnection connection; }
+    public sealed class DatabaseBackup
+    {
+        public string game,requestedDatabase,database,databaseOid,server,encoding,createdUtc,file,sha256,kind;
+        public int port;
+        public long bytes;
+    }
     public sealed class InstallRecord
     {
         public string server,database,databaseOid,status,detail,reportPath;
         public int port;
     }
 
-    public sealed class Engine
+    public sealed partial class Engine
     {
         public readonly string root;
         public Game[] catalog;
@@ -120,6 +130,7 @@ namespace ITDatabaseSetup
         Dictionary<string,string> hashes=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
         public readonly List<string> FileScanWarnings=new List<string>();
         public string BackupDirectory { get { return Path.Combine(root,"PG_backup"); } }
+        public string UserBackupDirectory { get { return BackupDirectory; } }
         public static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
         public Engine(string directory)
         {
@@ -143,6 +154,7 @@ namespace ITDatabaseSetup
                 var settings=Json.DeserializeObject(File.ReadAllText(SettingsPath)) as Dictionary<string,object>;
                 if(settings==null || (settings.ContainsKey("hideWelcome") && !(settings["hideWelcome"] is bool)))throw new Exception();
                 if(settings.ContainsKey("connection"))SettingsConnection(settings);
+                ReadBackupRecords(settings);
                 return settings;
             }catch{throw new Exception("Cannot read UserSettings.json. Check its connection fields and JSON syntax, or restore a valid copy. Your settings have not been replaced.");}
         }
@@ -171,6 +183,85 @@ namespace ITDatabaseSetup
         void SaveUserSettings(Dictionary<string,object> settings)
         {
             SettingsConnection(settings);AtomicText(SettingsPath,PrettyJson(settings));
+        }
+        List<DatabaseBackup> ReadBackupRecords(Dictionary<string,object> settings)
+        {
+            if(!settings.ContainsKey("backups"))return new List<DatabaseBackup>();
+            var records=Json.Deserialize<List<DatabaseBackup>>(Json.Serialize(settings["backups"]));
+            if(records==null || records.Any(item=>item==null))throw new Exception("Invalid backup history in UserSettings.json.");
+            foreach(var record in records){
+                if(!Regex.IsMatch(record.requestedDatabase??"","^[A-Za-z_][A-Za-z0-9_]{0,62}$") || String.IsNullOrEmpty(record.server) || record.port<1 || record.port>65535 || !Regex.IsMatch(record.sha256??"","^[a-f0-9]{64}$") || !Regex.IsMatch(record.encoding??"","^[A-Za-z0-9_]+$") || record.bytes<1)throw new Exception("Invalid backup history in UserSettings.json.");
+                if(record.kind!=null && record.kind!="initial" && record.kind!="export")throw new Exception("Invalid backup type in UserSettings.json.");
+                BackupCreatedUtc(record);
+                BackupRecordPath(record);
+            }
+            return records;
+        }
+        static DateTimeOffset BackupCreatedUtc(DatabaseBackup record)
+        {
+            DateTimeOffset created;
+            // Existing exports use the round-trip format. Accept equivalent ISO
+            // timestamps, but require a timezone so UI dates cannot be ambiguous.
+            string[] formats={"o","yyyy-MM-dd'T'HH:mm:ss'Z'","yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'","yyyy-MM-dd'T'HH:mm:sszzz","yyyy-MM-dd'T'HH:mm:ss.FFFFFFFzzz"};
+            if(!DateTimeOffset.TryParseExact(record.createdUtc,formats,CultureInfo.InvariantCulture,DateTimeStyles.AssumeUniversal|DateTimeStyles.AdjustToUniversal,out created))throw new Exception("Invalid backup date in UserSettings.json.");
+            return created;
+        }
+        public string BackupRecordPath(DatabaseBackup record)
+        {
+            string prefix="PG_backup/User Backups/"+record.requestedDatabase+"/";
+            string file=record.file??"";
+            bool legacy=file.StartsWith(prefix,StringComparison.Ordinal) && file.Substring(prefix.Length).IndexOfAny(new[]{'/', '\\'})<0 && Regex.IsMatch(file.Substring(prefix.Length),@"^[A-Za-z0-9_.-]+\.dump$");
+            if(!legacy && !DatedBackupPath(file))throw new Exception("Invalid saved backup path in UserSettings.json.");
+            return Path.Combine(root,file.Replace('/',Path.DirectorySeparatorChar));
+        }
+        static bool DatedBackupPath(string file)
+        {
+            Match match=Regex.Match(file??"",@"\Apg_backup/(?<day>[0-9]{4}-[0-9]{2}-[0-9]{2})/[A-Za-z0-9]+_(?<short>[0-9]{6})(?:_(?:[2-9]|[1-9][0-9]+))?_DBbackup\z",RegexOptions.IgnoreCase);
+            DateTime day;
+            return match.Success && DateTime.TryParseExact(match.Groups["day"].Value,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out day) && day.ToString("yyMMdd",CultureInfo.InvariantCulture)==match.Groups["short"].Value;
+        }
+        public static string BackupRelativePath(Game game,DateTime localDate,int version=1)
+        {
+            if(game==null)throw new ArgumentNullException("game");
+            if(version<1)throw new ArgumentOutOfRangeException("version");
+            string name=Regex.Replace(game.game??"",@"\bLive\b","",RegexOptions.IgnoreCase).Replace("&","And");
+            name=Regex.Replace(name,"[^A-Za-z0-9]","");
+            if(name.Length==0)name=Regex.Replace(game.database??"","[^A-Za-z0-9]","");
+            if(name.Length==0)throw new Exception("Choose a game name for its backup filename.");
+            if(name.Length>100)name=name.Substring(0,100);
+            return "pg_backup/"+localDate.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)+"/"+name+"_"+localDate.ToString("yyMMdd",CultureInfo.InvariantCulture)+(version==1?"":"_"+version.ToString(CultureInfo.InvariantCulture))+"_DBbackup";
+        }
+        void EnsureBackupParents(string relative)
+        {
+            string folder=root;
+            string[] parts=relative.Split('/');
+            foreach(string part in parts.Take(parts.Length-1)){folder=Path.Combine(folder,part);EnsureNormalFolder(folder);}
+        }
+        public DatabaseBackup LatestBackup(Connection connection,string database)
+        {
+            return BackupHistory(connection,database).FirstOrDefault(item=>File.Exists(BackupRecordPath(item)));
+        }
+        public DatabaseBackup[] BackupHistory(Connection connection,string database)
+        {
+            if(connection==null)throw new ArgumentNullException("connection");
+            return ReadBackupRecords(ReadUserSettings()).Select((item,index)=>new{record=item,index=index})
+                .Where(item=>ServerKey(item.record.server)==ServerKey(connection.server) && item.record.port==connection.port && item.record.requestedDatabase==database)
+                .OrderByDescending(item=>BackupCreatedUtc(item.record)).ThenByDescending(item=>item.index)
+                .Select(item=>item.record).ToArray();
+        }
+        public string BackupStatus(Connection connection,string database)
+        {
+            DatabaseBackup latest=BackupHistory(connection,database).FirstOrDefault();
+            // This is the last recorded snapshot date, even if its file was moved
+            // or removed. File availability belongs in the details, not this date.
+            return latest==null?"Never":BackupCreatedUtc(latest).ToLocalTime().ToString("MMM d, yyyy",CultureInfo.CurrentCulture);
+        }
+        bool IsUserBackup(string file)
+        {
+            string full=Path.GetFullPath(file);
+            if(full.StartsWith(Path.Combine(BackupDirectory,"User Backups")+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))return true;
+            string prefix=BackupDirectory+Path.DirectorySeparatorChar;
+            return full.StartsWith(prefix,StringComparison.OrdinalIgnoreCase) && DatedBackupPath("pg_backup/"+full.Substring(prefix.Length).Replace(Path.DirectorySeparatorChar,'/'));
         }
         public string PrepareBackupFolder(Game game)
         {
@@ -348,7 +439,7 @@ namespace ITDatabaseSetup
             foreach(string name in new[]{"PG_backup","pg_backups"}){
                 string folder=Path.Combine(root,name);if(Directory.Exists(folder))FindDatabaseFiles(folder,files,FileScanWarnings,CancellationToken.None,null);
             }
-            backupFiles=files.ToArray();
+            backupFiles=files.Where(file=>!IsUserBackup(file)).ToArray();
         }
         string CachedHash(string path) {string value;if(!hashes.TryGetValue(path,out value)){value=Hash(path);hashes[path]=value;}return value;}
         public string FindBackup(Game game)
@@ -457,7 +548,7 @@ namespace ITDatabaseSetup
             FileLoadResult result=new FileLoadResult {sourceFolder=sourceRoot};
             List<string> sources=new List<string>();bool changed=false;
             try{
-                FindDatabaseFiles(sourceRoot,sources,result.skippedPaths,cancel,progress);sources.Sort(StringComparer.OrdinalIgnoreCase);result.filesFound=sources.Count;
+                FindDatabaseFiles(sourceRoot,sources,result.skippedPaths,cancel,progress);sources.RemoveAll(IsUserBackup);sources.Sort(StringComparer.OrdinalIgnoreCase);result.filesFound=sources.Count;
                 Dictionary<string,string> sourceHashes=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
                 Dictionary<string,string[]> owners=new Dictionary<string,string[]>(StringComparer.OrdinalIgnoreCase);
                 Func<string,string> sourceHash=file=>{cancel.ThrowIfCancellationRequested();string hash;if(!sourceHashes.TryGetValue(file,out hash)){hash=Hash(file);sourceHashes[file]=hash;}return hash;};
@@ -706,7 +797,7 @@ namespace ITDatabaseSetup
                 }
             }finally{if(File.Exists(temp))File.Delete(temp);}
         }
-        public Report Build(Connection connection,string password,bool plan,Action<Entry> progress,IEnumerable<string> selectedDatabases=null,IEnumerable<string> confirmedOverwrites=null)
+        public Report Build(Connection connection,string password,bool plan,Action<Entry> progress,IEnumerable<string> selectedDatabases=null,IEnumerable<string> confirmedOverwrites=null,ConfirmedBackupRestore confirmedRestore=null)
         {
             ReloadDefinition();
             ScanFiles();
@@ -722,6 +813,10 @@ namespace ITDatabaseSetup
                 bool owns=false;
                 try { try { owns=gate.WaitOne(0); } catch (AbandonedMutexException) { owns=true; }
                     if (!owns) throw new Exception("Another database setup is running. Wait for it to finish.");
+                    if(confirmedRestore!=null){
+                        ValidateConfirmedRestore(connection,confirmedRestore);
+                        if(selected.Length!=1 || selected[0].database!=confirmedRestore.Database || !String.Equals(selected[0].databaseFile,confirmedRestore.Path,StringComparison.OrdinalIgnoreCase) || selected[0].sha256!=confirmedRestore.SHA256)throw new Exception("The confirmed restore source changed. No databases were changed.");
+                    }
                     return BuildLocked(connection,password,plan,progress,selected,overwrite);
                 } finally { if (owns) gate.ReleaseMutex(); }
             }
@@ -729,6 +824,113 @@ namespace ITDatabaseSetup
         static string HashText(string text)
         {
             using(var sha=SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(text))).Replace("-","").Substring(0,24);
+        }
+        public Report BackupDatabases(Connection connection,string password,IEnumerable<string> selectedDatabases,string existingAction,Action<Entry> progress)
+        {
+            ReloadDefinition();
+            string[] names=selectedDatabases==null?new string[0]:selectedDatabases.Distinct().ToArray();
+            if(names.Length==0 || names.Any(name=>!catalog.Any(game=>game.database==name)))throw new Exception("Check the installed games you want to back up.");
+            if(names.Any(name=>new[]{"postgres","template0","template1"}.Contains(name.ToLowerInvariant())))throw new Exception("Choose game databases rather than PostgreSQL system databases.");
+            if(existingAction!="ask" && existingAction!="keep" && existingAction!="overwrite")throw new Exception("Choose Keep versions or Overwrite latest for existing backups.");
+            ValidateConnection(connection);
+            if(String.IsNullOrEmpty(password))throw new Exception("Enter your PostgreSQL password.");
+            if(!File.Exists(Path.Combine(connection.pgBin,"pg_dump.exe")))throw new Exception("pg_dump.exe is missing. Select the PostgreSQL 8.3 bin folder to back up databases.");
+            using(var gate=new Mutex(false,"Local\\ITDatabaseTool_"+HashText(ServerKey(connection.server)+":"+connection.port.ToString()))){
+                bool owns=false;
+                try{
+                    try{owns=gate.WaitOne(0);}catch(AbandonedMutexException){owns=true;}
+                    if(!owns)throw new Exception("Another database operation is running. Wait for it to finish.");
+                    string[] installed=InstalledDatabases(connection,password);
+                    ToolResult version=RunTool(connection,password,"pg_dump.exe",new[]{"--version"},30000);
+                    if(version.code!=0 || !Regex.IsMatch(version.output,@"\b8\.3(?:\.|\s|$)"))throw new Exception("Use PostgreSQL 8.3 pg_dump.exe to back up these databases.");
+                    // CLI defaults to asking as well: never silently decide what to do
+                    // with an existing backup. UI supplies the user's explicit choice.
+                    if(existingAction=="ask" && names.Any(name=>LatestBackup(connection,name)!=null))throw new Exception("A backup already exists. Choose --backup-existing keep or --backup-existing overwrite, or use Backup in the app.");
+                    EnsureNormalFolder(BackupDirectory);
+                    string reportRoot=Path.Combine(root,"reports","backup-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N").Substring(0,8));
+                    PrivateDirectory(reportRoot);LastReportPath=Path.Combine(reportRoot,"backup-report.json");
+                    var report=new Report {server=connection.server,port=connection.port,serverVersion="8.3"};
+                    SaveReport(report);
+                    DateTime backupDate=DateTime.Now;
+                    foreach(Game game in catalog.Where(item=>names.Contains(item.database))){
+                        var entry=new Entry {game=game.game,requestedDatabase=game.database,database=game.database,status="Backing up"};
+                        report.entries.Add(entry);SaveReport(report);if(progress!=null)progress(entry);
+                        string partial=null;bool published=false;
+                        try{
+                            string[] matches=installed.Where(name=>String.Equals(name,game.database,StringComparison.OrdinalIgnoreCase)).ToArray();
+                            if(matches.Length==0){entry.status="Not installed";entry.detail="No installed database to back up.";continue;}
+                            if(matches.Length!=1)throw new Exception("Multiple database spellings exist. Choose a unique database before backing up.");
+                            entry.database=matches[0];entry.databaseInstalled=true;
+                            string[] metadata=Sql(connection,password,"postgres","SELECT oid||'|'||pg_encoding_to_char(encoding) FROM pg_database WHERE datname="+QL(entry.database)+";").Single().Split('|');
+                            entry.encoding=metadata[1];
+                            DatabaseBackup previous=LatestBackup(connection,game.database);
+                            bool overwrite=existingAction=="overwrite" && previous!=null;
+                            string relative=BackupRelativePath(game,backupDate);
+                            string stem=relative.Substring(0,relative.Length-"_DBbackup".Length);
+                            bool replaceDestination=overwrite && (String.Equals(previous.file,relative,StringComparison.OrdinalIgnoreCase) || Regex.IsMatch(previous.file,"^"+Regex.Escape(stem)+@"_(?:[2-9]|[1-9][0-9]+)_DBbackup$",RegexOptions.IgnoreCase));
+                            if(replaceDestination)relative=previous.file;
+                            else{
+                                var reserved=ReadBackupRecords(ReadUserSettings());
+                                for(int versionNumber=1;File.Exists(Path.Combine(root,relative.Replace('/',Path.DirectorySeparatorChar))) || Directory.Exists(Path.Combine(root,relative.Replace('/',Path.DirectorySeparatorChar))) || reserved.Any(item=>String.Equals(item.file,relative,StringComparison.OrdinalIgnoreCase));versionNumber++)relative=BackupRelativePath(game,backupDate,versionNumber+1);
+                            }
+                            string destination=Path.Combine(root,relative.Replace('/',Path.DirectorySeparatorChar));
+                            EnsureBackupParents(relative);
+                            string folder=Path.GetDirectoryName(destination);
+                            string previousPath=overwrite?BackupRecordPath(previous):null;
+                            Action checkPrevious=()=>{
+                                if(!overwrite)return;
+                                EnsureBackupParents(previous.file);
+                                if(!File.Exists(previousPath) || (File.GetAttributes(previousPath)&FileAttributes.ReparsePoint)!=0 || Hash(previousPath)!=previous.sha256)throw new Exception("The latest backup file changed, disappeared, or became a link. Keep versions to save a new backup.");
+                                if(catalog.Any(item=>!String.IsNullOrEmpty(item.databaseFile) && String.Equals(Path.GetFullPath(item.databaseFile),previousPath,StringComparison.OrdinalIgnoreCase)))throw new Exception("The latest backup is selected as a restore source. Keep versions to preserve that file association.");
+                            };
+                            Action checkDestination=()=>{
+                                EnsureBackupParents(relative);
+                                checkPrevious();
+                                if(File.Exists(destination) && (File.GetAttributes(destination)&FileAttributes.ReparsePoint)!=0)throw new Exception("Use a normal backup file rather than a link.");
+                                if(!replaceDestination && (File.Exists(destination) || Directory.Exists(destination)))throw new Exception("A file already exists at the new backup location. Retry to use another filename.");
+                            };
+                            checkDestination();
+                            partial=Path.Combine(folder,"."+Guid.NewGuid().ToString("N")+".partial");
+                            // SQL_ASCII game data can contain arbitrary legacy bytes.
+                            // Override the runner's UTF8 default with the source encoding.
+                            ToolResult dump=RunTool(connection,password,"pg_dump.exe",Common(connection).Concat(new[]{"-F","c","-E",metadata[1],"-f",partial,entry.database}),600000);
+                            if(dump.code!=0)throw new Exception("Database backup failed. "+dump.error.Trim());
+                            if(!File.Exists(partial) || new FileInfo(partial).Length==0)throw new Exception("PostgreSQL did not produce a backup file.");
+                            ToolResult verify=RunTool(connection,password,"pg_restore.exe",new[]{"--file", "NUL",partial},600000);
+                            if(verify.code!=0)throw new Exception("The backup archive could not be read completely. "+verify.error.Trim());
+                            string[] current=Sql(connection,password,"postgres","SELECT oid FROM pg_database WHERE datname="+QL(entry.database)+";");
+                            if(current.Length!=1 || current[0]!=metadata[0])throw new Exception("The database changed during backup. Retry after other database operations finish.");
+                            var record=new DatabaseBackup {kind="export",game=game.game,requestedDatabase=game.database,database=entry.database,databaseOid=metadata[0],server=connection.server,port=connection.port,encoding=metadata[1],createdUtc=DateTimeOffset.UtcNow.ToString("o"),file=relative,sha256=Hash(partial),bytes=new FileInfo(partial).Length};
+                            // Re-read settings after the dump to preserve external preference edits.
+                            var settings=ReadUserSettings();var records=ReadBackupRecords(settings);
+                            checkDestination();
+                            if(replaceDestination)File.Replace(partial,destination,null);else File.Move(partial,destination);
+                            partial=null;published=true;entry.backup=destination;entry.backupSHA256=record.sha256;
+                            records.RemoveAll(item=>String.Equals(item.file,relative,StringComparison.OrdinalIgnoreCase));records.Add(record);
+                            settings["backups"]=records;SaveUserSettings(settings);
+                            entry.status="Backed up";entry.detail=(overwrite?"Replaced the latest backup. ":"Saved a new backup version. ")+"Use Add database file to select this backup for a later restore. "+destination;
+                            if(overwrite && !replaceDestination){
+                                try{
+                                    // Keep the prior file until the new dated backup and its
+                                    // history are safely published. Never delete a changed file.
+                                    checkPrevious();File.Delete(previousPath);
+                                    var cleanupSettings=ReadUserSettings();var cleanupRecords=ReadBackupRecords(cleanupSettings);
+                                    cleanupRecords.RemoveAll(item=>String.Equals(item.file,previous.file,StringComparison.OrdinalIgnoreCase) && item.sha256==previous.sha256);
+                                    cleanupSettings["backups"]=cleanupRecords;SaveUserSettings(cleanupSettings);
+                                }catch(Exception cleanup){entry.detail+=" The new backup is available, but cleanup of the previous version was incomplete: "+cleanup.Message;}
+                            }
+                            if(!String.IsNullOrWhiteSpace(dump.error))entry.detail+=" PostgreSQL warning: "+dump.error.Trim();
+                        }catch(Exception ex){
+                            entry.status="Needs review";
+                            entry.detail=(published?"The verified backup was saved at "+entry.backup+", but its history could not be saved. Keep this file. ":"No new backup was saved; existing backups were kept. ")+ex.Message.Replace(password,"[redacted]");
+                        }finally{
+                            if(partial!=null && File.Exists(partial))File.Delete(partial);
+                            SaveReport(report);if(progress!=null)progress(entry);
+                        }
+                    }
+                    report.completed=true;SaveReport(report);return report;
+                }finally{if(owns)gate.ReleaseMutex();}
+            }
         }
         public Report RemoveDatabases(Connection connection,string password,IEnumerable<string> selectedDatabases,bool confirmed,Action<Entry> progress,bool plan=false)
         {
@@ -850,6 +1052,8 @@ namespace ITDatabaseSetup
                     try{entry.backup=FindBackup(g);}catch(BackupChoiceException ex){entry.status="Choose backup";entry.detail=ex.Message;SaveReport(report);progress(entry);continue;}
                     if(entry.backup==null) { entry.status="Waiting for backup"; entry.detail="Put the database file anywhere inside PG_backup, or select this game and click Add database file."; SaveReport(report); progress(entry); continue; }
                     entry.backupSHA256=Hash(entry.backup);
+                    DatabaseBackup savedBackup=ReadBackupRecords(ReadUserSettings()).LastOrDefault(item=>item.kind!="initial" && item.requestedDatabase==g.database && item.sha256==entry.backupSHA256);
+                    if(savedBackup!=null)entry.encoding=savedBackup.encoding;
                     if(!String.IsNullOrEmpty(g.sha256) && entry.backupSHA256!=g.sha256){entry.status="Backup needs review";entry.detail="The database file changed since it was identified. Reload and try again.";SaveReport(report);progress(entry);continue;}
                     // Validate archive metadata before creating a database.
                     ToolResult toc=RunTool(c,password,"pg_restore.exe",new[]{"-l",entry.backup},30000);
@@ -867,20 +1071,25 @@ namespace ITDatabaseSetup
                     // interrupted new installs never occupy the game's DB name.
                     string target=TemporaryDatabaseName(entry.database,"restore");
                     entry.restoreDatabase=target;
-                    Sql(c,password,"postgres","CREATE DATABASE "+QI(target)+" WITH OWNER="+QI(c.username)+" TEMPLATE=template0 ENCODING="+QL(g.encoding)+" TABLESPACE=pg_default;");
+                    Sql(c,password,"postgres","CREATE DATABASE "+QI(target)+" WITH OWNER="+QI(c.username)+" TEMPLATE=template0 ENCODING="+QL(entry.encoding)+" TABLESPACE=pg_default;");
                     entry.restoreDatabaseOid=Sql(c,password,"postgres","SELECT oid FROM pg_database WHERE datname="+QL(target)+";").Single();
                     entry.status="Created; restore pending"; SaveReport(report); progress(entry);
                     Sql(c,password,"postgres","ALTER DATABASE "+QI(target)+" SET standard_conforming_strings=on;");
                     entry.status="Restoring"; SaveReport(report); progress(entry);
                     bool explicitProfile=g.restoreProfile=="it-category-keys-v1";
-                    ToolResult restored=explicitProfile || HasITCategoryLayout(toc.output)?RestoreLegacyIT(c,password,target,entry.backup,toc.output,runRoot,g.database,explicitProfile):RunTool(c,password,"pg_restore.exe",Common(c).Concat(new[]{"-d",target,"--no-owner","--no-acl","--exit-on-error","--single-transaction",entry.backup}),600000);
+                    // Our verified exports already contain the installed schema.
+                    // Restore it as-is, including compatible keys or missing optional
+                    // constraints in manual installs, rather than reapplying a profile
+                    // intended for the original distributed game archive.
+                    bool userBackup=savedBackup!=null;
+                    ToolResult restored=!userBackup && (explicitProfile || HasITCategoryLayout(toc.output))?RestoreLegacyIT(c,password,target,entry.backup,toc.output,runRoot,g.database,explicitProfile):RunTool(c,password,"pg_restore.exe",Common(c).Concat(new[]{"-d",target,"--no-owner","--no-acl","--exit-on-error","--single-transaction",entry.backup}),600000);
                     entry.restoreExitCode=restored.code;
                     entry.restoreLog=Path.Combine(runRoot,g.database+"-restore.log");
                     File.WriteAllText(entry.restoreLog,restored.output+"\r\n--- ERRORS / WARNINGS ---\r\n"+restored.error);
                     Sql(c,password,"postgres","ALTER DATABASE "+QI(target)+" SET standard_conforming_strings=on;");
                     int[] tables=TableCounts(c,password,target);entry.publicTables=tables[0];entry.gameTables=tables[1];
                     string[] settings=Sql(c,password,"postgres","SELECT pg_encoding_to_char(encoding)||'|'||pg_get_userbyid(datdba)||'|'||array_to_string(datconfig,',') FROM pg_database WHERE datname="+QL(target)+";");
-                    entry.settingsVerified=settings.Length==1 && settings[0]==g.encoding+"|"+c.username+"|standard_conforming_strings=on";
+                    entry.settingsVerified=settings.Length==1 && settings[0]==entry.encoding+"|"+c.username+"|standard_conforming_strings=on";
                     bool preserved=Hash(entry.backup)==entry.backupSHA256;
                     int expectedTables=Regex.Matches(toc.output,@"(?m)^\s*\d+;\s+\d+\s+\d+\s+TABLE\s+(?!DATA\s|pg_|information_schema\s)\S+\s").Count;
                     entry.expectedTables=expectedTables;entry.sourceUnchanged=preserved;
@@ -920,6 +1129,9 @@ namespace ITDatabaseSetup
                     }
                     if(entry.status=="Imported" || entry.status=="Clean installed"){
                         try{RecordInstallation(c,entry);}catch(IOException ex){entry.detail+=" Installed successfully, but local installation history could not be saved: "+ex.Message;}catch(UnauthorizedAccessException ex){entry.detail+=" Installed successfully, but local installation history could not be saved: "+ex.Message;}
+                    }
+                    if(activated && !replacing && entry.status=="Imported"){
+                        try{RecordInitialBackup(g,entry,c,password);}catch(Exception ex){entry.initialBackupError=ex.Message.Replace(password,"[redacted]");entry.detail+=" Installed successfully, but the initial backup could not be completed: "+entry.initialBackupError;}
                     }
                     SaveReport(report); progress(entry);
                     }catch(Exception ex){
@@ -1156,17 +1368,34 @@ namespace ITDatabaseSetup
     }
     public sealed class WelcomeForm : Form
     {
+        public const string RepositoryURL="https://github.com/natemac/IT-Database-Tool";
         readonly CheckBox hide=new CheckBox();
         public bool DontShowAgain {get{return hide.Checked;}}
         public WelcomeForm(bool hidden)
         {
-            Text="Welcome to IT Database Builder";ClientSize=new Size(640,490);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;StartPosition=FormStartPosition.CenterParent;Font=new Font("Segoe UI",11);BackColor=Color.FromArgb(247,248,250);
+            string version=typeof(WelcomeForm).Assembly.GetName().Version.ToString(3);
+            Text="Welcome to IT Database Builder v"+version;ClientSize=new Size(640,552);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;StartPosition=FormStartPosition.CenterParent;Font=new Font("Segoe UI",11);BackColor=Color.FromArgb(247,248,250);
             var title=new Label {Text="Your game databases, in a few clicks",Font=new Font("Segoe UI",18,FontStyle.Bold)};title.SetBounds(24,20,595,42);Controls.Add(title);
-            var basics=new Label {Text="1. Use PostgreSQL / pgAdmin setup if PostgreSQL 8.3 is missing.\r\n2. Add database files, or auto-load them from your games folder.\r\n3. Check the games you want, then choose an action:\r\n\r\nInstall adds missing databases and skips installed ones.\r\nClean install restores installed databases from their original files.\r\nRemove deletes installed databases, including their saved progress.\r\n\r\nGreen = installed. Black = ready. Red = missing file or needs repair.\r\nClean install and Remove ask before changing installed databases."};basics.SetBounds(26,76,590,250);Controls.Add(basics);
-            var credit=new Label {Text=InstallHelpForm.Credit+", creator of the IT setup guide."};credit.SetBounds(26,340,590,28);Controls.Add(credit);
-            var github=new LinkLabel {Text="GitHub: Eggmansworld/tp-it-guides"};github.SetBounds(26,373,590,28);github.LinkClicked+=(s,e)=>InstallHelpForm.OpenLink(InstallHelpForm.GuideURL);Controls.Add(github);
-            hide.Text="Don't show again";hide.Checked=hidden;hide.SetBounds(26,429,300,30);Controls.Add(hide);
-            var start=new Button {Text="Get started",DialogResult=DialogResult.OK};start.SetBounds(452,425,164,40);Controls.Add(start);AcceptButton=start;
+            var versionLabel=new Label {Text="IT Database Builder  ·  Version "+version,ForeColor=UiTheme.Muted,AccessibleName="App version"};versionLabel.SetBounds(26,66,590,26);Controls.Add(versionLabel);
+            var basics=new Label {Text="1. Use PostgreSQL / pgAdmin setup if PostgreSQL 8.3 is missing.\r\n2. Add database files, or auto-load them from your games folder.\r\n3. Check games, or Ctrl/Shift-click rows and right-click for actions.\r\n\r\nInstall adds missing databases and skips installed ones.\r\nClean install restores installed databases from the selected files.\r\nRemove deletes installed databases, including their saved progress.\r\nBack up saves current data and progress in dated pg_backup folders.\r\n\r\nGreen = installed. Black = ready. Red = missing file or needs repair.\r\nClean install and Remove ask before changing installed databases."};basics.SetBounds(26,106,590,250);Controls.Add(basics);
+            var repository=new LinkLabel {Text="App on GitHub: natemac/IT-Database-Tool",AccessibleName="App GitHub repository"};repository.SetBounds(26,370,590,28);repository.Links.Add(0,repository.Text.Length,RepositoryURL);repository.LinkClicked+=(s,e)=>InstallHelpForm.OpenLink(RepositoryURL);Controls.Add(repository);
+            var credit=new Label {Text=InstallHelpForm.Credit+", creator of the IT setup guide."};credit.SetBounds(26,409,590,28);Controls.Add(credit);
+            var github=new LinkLabel {Text="Guide on GitHub: Eggmansworld/tp-it-guides"};github.SetBounds(26,441,590,28);github.LinkClicked+=(s,e)=>InstallHelpForm.OpenLink(InstallHelpForm.GuideURL);Controls.Add(github);
+            hide.Text="Don't show again";hide.Checked=hidden;hide.SetBounds(26,491,300,30);Controls.Add(hide);
+            var start=new Button {Text="Get started",DialogResult=DialogResult.OK};start.SetBounds(452,487,164,40);Controls.Add(start);AcceptButton=start;UiTheme.Apply(this);
+        }
+    }
+    public sealed class BackupChoiceForm : Form
+    {
+        public string ExistingAction {get;private set;}
+        public BackupChoiceForm(IEnumerable<DatabaseBackup> backups)
+        {
+            Text="A backup already exists";ClientSize=new Size(660,340);Font=new Font("Segoe UI",10);StartPosition=FormStartPosition.CenterParent;FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;
+            var description=new Label {Text="Choose how to save these databases. Keep versions saves new dated files. Overwrite latest replaces only the latest backup for each game listed below, after the new backup passes verification."};description.SetBounds(22,18,616,70);Controls.Add(description);
+            var files=new TextBox {Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Text=String.Join("\r\n\r\n",backups.Select(item=>item.game+"\r\n"+item.file))};files.SetBounds(22,100,616,158);Controls.Add(files);
+            var keep=new Button {Text="Keep versions"};keep.SetBounds(162,282,150,36);keep.Click+=(s,e)=>{ExistingAction="keep";DialogResult=DialogResult.OK;};Controls.Add(keep);AcceptButton=keep;
+            var overwrite=new Button {Text="Overwrite latest"};overwrite.SetBounds(322,282,156,36);overwrite.Click+=(s,e)=>{ExistingAction="overwrite";DialogResult=DialogResult.OK;};Controls.Add(overwrite);
+            var cancel=new Button {Text="Cancel",DialogResult=DialogResult.Cancel};cancel.SetBounds(488,282,150,36);Controls.Add(cancel);CancelButton=cancel;UiTheme.Apply(this);
         }
     }
     public sealed class CheckboxListView : ListView
@@ -1175,8 +1404,8 @@ namespace ITDatabaseSetup
         protected override void WndProc(ref Message message)
         {
             // Native list views can also toggle on a row double-click.
-            // Only suppress the native double-click toggle. A normal click can
-            // open a file picker, whose result must be allowed to check a row.
+            // Only suppress the native double-click toggle. Normal clicks retain
+            // native row selection, including Ctrl/Shift selection ranges.
             if(message.Msg==0x203){
                 int position=message.LParam.ToInt32();
                 ListViewHitTestInfo hit=HitTest(new Point((short)(position&0xffff),(short)((position>>16)&0xffff)));
@@ -1194,7 +1423,7 @@ namespace ITDatabaseSetup
     {
         readonly Engine engine;
         readonly ListView list=new CheckboxListView();
-        readonly Button build=new Button(), refresh=new Button(), reportButton=new Button(), connect=new Button();
+        readonly Button build=new ModernButton(), refresh=new ModernButton(), reportButton=new ModernButton(), connect=new ModernButton();
         readonly Label intro=new Label(), summary=new Label();
         readonly TextBox server=new TextBox(), user=new TextBox(), password=new TextBox(), pgBin=new TextBox();
         readonly NumericUpDown port=new NumericUpDown();
@@ -1205,70 +1434,171 @@ namespace ITDatabaseSetup
         readonly Button addGame=new Button(), editGame=new Button();
         readonly Button autoLoad=new Button();
         readonly Button clean=new Button(), remove=new Button(), welcome=new Button();
+        readonly Button backup=new ModernButton {Primary=true}, openBackups=new Button();
+        readonly Button filesMenuButton=new ModernButton(), libraryMenuButton=new ModernButton(), helpMenuButton=new ModernButton(), selectedMenuButton=new ModernButton(), rowMenuButton=new ModernButton();
+        readonly RoundedCard connectionCard=new RoundedCard();
+        readonly Label subtitle=new Label(), inventorySummary=new Label(), selectionSummary=new Label();
+        readonly ContextMenuStrip filesMenu=new ContextMenuStrip(), libraryMenu=new ContextMenuStrip(), helpMenu=new ContextMenuStrip(), selectedMenu=new ContextMenuStrip(), rowMenu=new ContextMenuStrip();
+        ToolStripMenuItem selectedBackup,selectedClean,selectedRemove,rowBackup,rowInstall,rowClean,rowRemove,rowChoose,rowEdit,rowProperties,rowOpenBackup,rowRestore;
+        string[] rowMenuDatabases=new string[0];
         CancellationTokenSource fileSearch;
         string lastGamesFolder;
         bool busy,scanning,syncingChecks,databasesChecked;
         bool connectionEdited, passwordEdited, loadingConnection, restartRequired;
         public SetupForm(Engine core)
         {
-            engine=core; Text="IT Database Builder"; ClientSize=new Size(1000,820); MinimumSize=new Size(1016,820);
-            StartPosition=FormStartPosition.CenterScreen; Font=new Font("Segoe UI",10); BackColor=Color.FromArgb(247,248,250);
-            intro.Text="Manage your game databases"; intro.Font=new Font("Segoe UI",19,FontStyle.Bold); intro.SetBounds(22,17,760,40); Controls.Add(intro);
-            welcome.Text="Welcome / basics";welcome.SetBounds(822,24,154,32);welcome.Anchor=AnchorStyles.Top|AnchorStyles.Right;Controls.Add(welcome);welcome.Click+=(s,e)=>ShowWelcome();
-            editInfo.Text="Open Database List";editInfo.SetBounds(571,267,155,34);Controls.Add(editInfo);
-            addGame.Text="Add game";addGame.SetBounds(736,267,90,34);Controls.Add(addGame);addGame.Click+=(s,e)=>EditGame(false);
-            editGame.Text="Edit game";editGame.SetBounds(836,267,90,34);Controls.Add(editGame);editGame.Click+=(s,e)=>EditGame(true);
-            installHelp.Text="PostgreSQL / pgAdmin setup";installHelp.SetBounds(516,24,294,32);installHelp.Anchor=AnchorStyles.Top|AnchorStyles.Right;Controls.Add(installHelp);
-            editInfo.Click+=(s,e)=>{try{Process.Start(new ProcessStartInfo("notepad.exe","\""+engine.DefinitionPath+"\""){UseShellExecute=true});}catch(Exception ex){summary.Text=ex.Message;}};
-            installHelp.Click+=async(s,e)=>await ShowInstallHelp();
-            GroupBox connection=new GroupBox {Text="Local PostgreSQL connection"}; connection.SetBounds(22,99,954,156); connection.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right; Controls.Add(connection);
-            AddField(connection,"Address",server,14,27,165); AddField(connection,"Username",user,315,27,180);
-            Label portLabel=new Label {Text="Port"}; portLabel.SetBounds(190,27,80,20); connection.Controls.Add(portLabel);
-            port.Minimum=1; port.Maximum=65535; port.SetBounds(190,49,105,27); connection.Controls.Add(port);
-            AddField(connection,"Password",password,515,27,205); password.UseSystemPasswordChar=true;
-            connect.Text="Connect";connect.SetBounds(735,49,110,28);connection.Controls.Add(connect);
+            engine=core;Text="IT Database Builder v1.2.0";ClientSize=new Size(1280,820);MinimumSize=new Size(1056,799);
+            StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(245,246,248);
+            intro.Text="Database Library";intro.Font=new Font("Segoe UI",23,FontStyle.Bold);Controls.Add(intro);
+            subtitle.Text="Your games, saved progress and database backups. All in one place.";subtitle.ForeColor=Color.FromArgb(105,111,121);Controls.Add(subtitle);
+            helpMenuButton.Text="Help  ▾";Controls.Add(helpMenuButton);
+            Controls.Add(connectionCard);
+            AddField(connectionCard,"Address",server,18,16,170);
+            var portLabel=new Label {Text="Port"};portLabel.SetBounds(202,16,84,20);connectionCard.Controls.Add(portLabel);
+            port.Minimum=1;port.Maximum=65535;port.SetBounds(202,38,84,28);connectionCard.Controls.Add(port);
+            AddField(connectionCard,"Username",user,302,16,160);
+            AddField(connectionCard,"Password",password,478,16,200);password.UseSystemPasswordChar=true;
+            connect.Text="Connect";connect.SetBounds(696,35,116,34);connectionCard.Controls.Add(connect);
             connect.Click+=async(s,e)=>{if(PersistPassword())await Scan();};
-            AddField(connection,"PostgreSQL 8.3 tools",pgBin,14,86,750);
-            Button browse=new Button {Text="Browse..."}; browse.SetBounds(779,106,110,28); connection.Controls.Add(browse);
-            browse.Click+=(s,e)=>{ using(var dialog=new FolderBrowserDialog()){dialog.Description="Select the installed PostgreSQL 8.3 bin folder"; if(dialog.ShowDialog(this)==DialogResult.OK)pgBin.Text=dialog.SelectedPath;} };
-            Connection saved=engine.LoadConnection(); server.Text=saved.server; port.Value=saved.port; user.Text=saved.username; pgBin.Text=saved.pgBin;
-            password.Text=engine.InfoField("Password")??"";
-            selectAll.Text="Select all";selectAll.SetBounds(24,267,92,34);Controls.Add(selectAll);selectAll.Click+=(s,e)=>{bool check=selectAll.CheckState!=CheckState.Checked;syncingChecks=true;try{foreach(ListViewItem row in list.Items)row.Checked=check;}finally{syncingChecks=false;UpdateSelectAll();}};
-            clearAll.Text="Clear all";clearAll.SetBounds(126,267,85,34);Controls.Add(clearAll);clearAll.Click+=(s,e)=>{foreach(ListViewItem row in list.Items)row.Checked=false;};
-            choose.Text="Add database file";choose.SetBounds(221,267,145,34);Controls.Add(choose);choose.Click+=(s,e)=>ChooseBackup();
-            autoLoad.Text="Auto-Find database files";autoLoad.SetBounds(376,267,185,34);Controls.Add(autoLoad);autoLoad.Click+=(s,e)=>AutoLoadFiles();
-            list.View=View.Details; list.FullRowSelect=true; list.GridLines=true; list.HideSelection=false;list.MultiSelect=false;list.CheckBoxes=true; list.SetBounds(22,314,954,356);
-            list.Anchor=AnchorStyles.Top|AnchorStyles.Left|AnchorStyles.Right|AnchorStyles.Bottom;
-            list.Columns.Add("Game",235); list.Columns.Add("Database",120); list.Columns.Add("Status",210); list.Columns.Add("Database file / expected path",655); Controls.Add(list);
-            list.MouseClick+=RowClicked;
-            list.MouseMove+=(s,e)=>{ListViewHitTestInfo hit=list.HitTest(e.Location);list.Cursor=!busy && !scanning && hit.Item!=null?Cursors.Hand:Cursors.Default;};
-            list.ItemChecked+=(s,e)=>{if(!syncingChecks)UpdateSelectAll();};
-            list.SelectedIndexChanged+=(s,e)=>UpdateActionButtons();
-            summary.SetBounds(24,683,952,50); summary.Anchor=AnchorStyles.Left|AnchorStyles.Right|AnchorStyles.Bottom; Controls.Add(summary);
-            progress.SetBounds(24,738,952,7); progress.Anchor=AnchorStyles.Left|AnchorStyles.Right|AnchorStyles.Bottom; Controls.Add(progress);
-            build.Text="Install"; build.SetBounds(24,760,156,38); build.Anchor=AnchorStyles.Left|AnchorStyles.Bottom; build.BackColor=Color.FromArgb(28,93,178); build.ForeColor=Color.White; build.FlatStyle=FlatStyle.Flat; Controls.Add(build);
-            clean.Text="Clean install";clean.SetBounds(194,760,156,38);clean.Anchor=AnchorStyles.Left|AnchorStyles.Bottom;Controls.Add(clean);
-            remove.Text="Remove";remove.SetBounds(364,760,156,38);remove.Anchor=AnchorStyles.Left|AnchorStyles.Bottom;Controls.Add(remove);
-            refresh.Text="Reload info / files"; refresh.SetBounds(534,760,210,38); refresh.Anchor=AnchorStyles.Left|AnchorStyles.Bottom; Controls.Add(refresh);
-            reportButton.Text="Open latest report"; reportButton.SetBounds(786,760,190,38); reportButton.Anchor=AnchorStyles.Right|AnchorStyles.Bottom; reportButton.Enabled=false; Controls.Add(reportButton);
-            refresh.Click+=async(s,e)=>await Scan(); build.Click+=async(s,e)=>await StartBuild(connection);
-            clean.Click+=async(s,e)=>await StartBuild(connection,true);remove.Click+=async(s,e)=>await StartRemove();
-            reportButton.Click+=(s,e)=>{try{if(File.Exists(engine.LastReportPath))Process.Start(new ProcessStartInfo(Path.GetDirectoryName(engine.LastReportPath)){UseShellExecute=true});else{summary.Text="The latest report is no longer available.";UpdateActionButtons();}}catch(Exception ex){summary.Text="Could not open the report: "+ex.Message;}};
-            FormClosing+=(s,e)=>{if(fileSearch!=null){fileSearch.Cancel();e.Cancel=true;summary.Text="Canceling the file search. Close the app after it finishes.";}else if(busy){e.Cancel=true; summary.Text="A database operation is running. Wait for it to finish.";}else if(!PersistPassword())e.Cancel=true;};
+            AddField(connectionCard,"PostgreSQL 8.3 tools",pgBin,18,76,660);
+            var browse=new ModernButton {Text="Browse…"};browse.SetBounds(696,95,116,30);connectionCard.Controls.Add(browse);
+            browse.Click+=(s,e)=>{using(var dialog=new FolderBrowserDialog()){dialog.Description="Select your PostgreSQL 8.3 bin folder";if(dialog.ShowDialog(this)==DialogResult.OK)pgBin.Text=dialog.SelectedPath;}};
+            Connection saved=engine.LoadConnection();server.Text=saved.server;port.Value=saved.port;user.Text=saved.username;pgBin.Text=saved.pgBin;password.Text=engine.InfoField("Password")??"";
+            var section=new Label {Text="Databases",Font=new Font("Segoe UI",17,FontStyle.Bold),Name="databaseHeading"};section.SetBounds(24,252,400,34);Controls.Add(section);
+            inventorySummary.Text="Connect to check your database library.";inventorySummary.ForeColor=subtitle.ForeColor;Controls.Add(inventorySummary);
+            backup.Text="Backup databases";Controls.Add(backup);backup.Click+=async(s,e)=>await StartBackup(true);
+            selectAll.Text="Select all";Controls.Add(selectAll);selectAll.Click+=(s,e)=>{bool check=selectAll.CheckState!=CheckState.Checked;syncingChecks=true;try{foreach(ListViewItem row in list.Items)row.Checked=check;}finally{syncingChecks=false;UpdateSelectAll();}};
+            filesMenuButton.Text="Add files  ▾";Controls.Add(filesMenuButton);
+            libraryMenuButton.Text="Library  ▾";Controls.Add(libraryMenuButton);
+            refresh.Text="Refresh";Controls.Add(refresh);refresh.Click+=async(s,e)=>await Scan();
+            rowMenuButton.Text="Database actions  ▾";Controls.Add(rowMenuButton);
+            list.View=View.Details;list.FullRowSelect=true;list.HideSelection=false;list.MultiSelect=true;list.CheckBoxes=true;
+            list.Columns.Add("Game",220);list.Columns.Add("Database",115);list.Columns.Add("Status",195);list.Columns.Add("Latest backup / source file",360);list.Columns.Add("Backed up",135);
+            list.Columns[4].DisplayIndex=3;list.Columns[3].DisplayIndex=4;Controls.Add(list);UiTheme.StyleTable(list);
+            list.MouseDown+=RowMouseDown;
+            list.ItemChecked+=(s,e)=>{if(!syncingChecks)UpdateSelectAll();};list.SelectedIndexChanged+=(s,e)=>UpdateActionButtons();
+            list.ContextMenuStrip=rowMenu;
+            summary.ForeColor=Color.FromArgb(85,92,104);Controls.Add(summary);Controls.Add(progress);
+            build.Text="Install selected";((ModernButton)build).Primary=true;Controls.Add(build);build.Click+=async(s,e)=>await StartBuild(connectionCard);
+            selectedMenuButton.Text="Selected actions  ▾";Controls.Add(selectedMenuButton);
+            selectionSummary.ForeColor=subtitle.ForeColor;Controls.Add(selectionSummary);
+            reportButton.Text="Latest report";Controls.Add(reportButton);reportButton.Click+=(s,e)=>OpenLatestReport();
+            // Command objects keep the existing action guards in one place. They
+            // are exposed through menus instead of another row of buttons.
+            choose.Click+=(s,e)=>ChooseBackup();autoLoad.Click+=(s,e)=>AutoLoadFiles();addGame.Click+=(s,e)=>EditGame(false);editGame.Click+=(s,e)=>EditGame(true);
+            clearAll.Click+=(s,e)=>{foreach(ListViewItem row in list.Items)row.Checked=false;};
+            clean.Click+=async(s,e)=>await StartBuild(connectionCard,true);remove.Click+=async(s,e)=>await StartRemove();welcome.Click+=(s,e)=>ShowWelcome();installHelp.Click+=async(s,e)=>await ShowInstallHelp();
+            editInfo.Click+=(s,e)=>{try{Process.Start(new ProcessStartInfo("notepad.exe","\""+engine.DefinitionPath+"\""){UseShellExecute=true});}catch(Exception ex){summary.Text=ex.Message;}};
+            openBackups.Click+=(s,e)=>OpenBackupFolder(null);
+            BuildMenus();
+            FormClosing+=(s,e)=>{if(fileSearch!=null){fileSearch.Cancel();e.Cancel=true;summary.Text="Canceling the file search. Close the app after it finishes.";}else if(busy || scanning){e.Cancel=true;summary.Text="A database operation is running. Wait for it to finish.";}else if(!PersistPassword())e.Cancel=true;};
+            FormClosed+=(s,e)=>{foreach(var menu in new[]{filesMenu,libraryMenu,helpMenu,selectedMenu,rowMenu})menu.Dispose();foreach(var command in new[]{choose,autoLoad,addGame,editGame,clearAll,clean,remove,welcome,installHelp,editInfo,openBackups})command.Dispose();};
             server.TextChanged+=(s,e)=>ConnectionChanged();user.TextChanged+=(s,e)=>ConnectionChanged();pgBin.TextChanged+=(s,e)=>ConnectionChanged();port.ValueChanged+=(s,e)=>ConnectionChanged();
             password.TextChanged+=(s,e)=>{if(!loadingConnection)passwordEdited=true;MarkConnectionUnverified();};
             password.Leave+=(s,e)=>{if(!loadingConnection && !busy && !scanning)PersistPassword();};
             Shown+=async(s,e)=>{if(!engine.HideWelcome())ShowWelcome();await Scan();if(!IsDisposed && !Engine.ToolsPresent(pgBin.Text))await ShowInstallHelp();};
-            ClientSize=new Size(1300,820);
-            UpdateActionButtons();
+            Resize+=(s,e)=>LayoutLibrary();LayoutLibrary();UiTheme.Apply(this);UpdateActionButtons();
         }
-        void RowClicked(object sender,MouseEventArgs e)
+        void LayoutLibrary()
         {
-            if(busy || scanning || e.Button!=MouseButtons.Left)return;
-            ListViewHitTestInfo hit=list.HitTest(e.Location);if(hit.Item==null)return;
-            hit.Item.Selected=true;
-            if(hit.SubItem==hit.Item.SubItems[3]){ChooseBackup();return;}
-            // Only the native checkbox toggles selection for installation.
+            int width=ClientSize.Width,height=ClientSize.Height;
+            intro.SetBounds(24,22,width-180,42);subtitle.SetBounds(26,68,width-180,24);helpMenuButton.SetBounds(width-124,28,100,36);
+            connectionCard.SetBounds(24,104,width-48,140);
+            inventorySummary.SetBounds(26,288,width-300,24);backup.SetBounds(width-246,258,222,42);
+            selectAll.SetBounds(26,324,96,34);filesMenuButton.SetBounds(134,322,126,36);libraryMenuButton.SetBounds(272,322,110,36);refresh.SetBounds(394,322,100,36);rowMenuButton.SetBounds(width-208,322,184,36);
+            list.SetBounds(24,372,width-48,Math.Max(180,height-514));
+            list.Columns[3].Width=Math.Max(260,list.ClientSize.Width-220-115-195-135-24);
+            summary.SetBounds(26,height-130,width-52,48);progress.SetBounds(24,height-75,width-48,4);
+            build.SetBounds(24,height-60,152,38);selectedMenuButton.SetBounds(188,height-60,174,38);selectionSummary.SetBounds(378,height-53,Math.Max(180,width-570),28);reportButton.SetBounds(width-174,height-60,150,38);
+        }
+        Connection CurrentConnection()
+        {return new Connection {server=server.Text.Trim(),port=(int)port.Value,username=user.Text.Trim(),pgBin=Engine.DetectTools(pgBin.Text.Trim())};}
+        static ToolStripMenuItem MenuItem(ContextMenuStrip menu,string text,EventHandler action)
+        {var item=new ToolStripMenuItem(text);item.Click+=action;menu.Items.Add(item);return item;}
+        void BuildMenus()
+        {
+            MenuItem(filesMenu,"Add database file…",(s,e)=>choose.PerformClick());MenuItem(filesMenu,"Auto-Find database files…",(s,e)=>autoLoad.PerformClick());
+            MenuItem(libraryMenu,"Add game…",(s,e)=>addGame.PerformClick());
+            libraryMenu.Items.Add(new ToolStripSeparator());MenuItem(libraryMenu,"Open backups folder",(s,e)=>openBackups.PerformClick());MenuItem(libraryMenu,"Open Database List",(s,e)=>editInfo.PerformClick());MenuItem(libraryMenu,"Clear checkboxes",(s,e)=>clearAll.PerformClick());
+            MenuItem(helpMenu,"Welcome / basics",(s,e)=>welcome.PerformClick());MenuItem(helpMenu,"PostgreSQL / pgAdmin setup",(s,e)=>installHelp.PerformClick());
+            selectedBackup=MenuItem(selectedMenu,"Back up selected databases",async(s,e)=>await StartBackup(false));selectedClean=MenuItem(selectedMenu,"Clean install selected…",async(s,e)=>await StartBuild(connectionCard,true));
+            selectedMenu.Items.Add(new ToolStripSeparator());selectedRemove=MenuItem(selectedMenu,"Remove selected databases…",async(s,e)=>await StartRemove());selectedRemove.ForeColor=Color.Firebrick;
+            rowBackup=MenuItem(rowMenu,"Back Up Database",async(s,e)=>await StartBackup(false,rowMenuDatabases.ToArray()));
+            rowRestore=MenuItem(rowMenu,"Restore backup…",(s,e)=>ShowBackupPicker());
+            rowOpenBackup=MenuItem(rowMenu,"Open latest backup folder",(s,e)=>OpenBackupFolder(SelectedDatabase()));
+            rowMenu.Items.Add(new ToolStripSeparator());
+            rowInstall=MenuItem(rowMenu,"Install Database",async(s,e)=>await StartBuild(connectionCard,false,rowMenuDatabases.ToArray()));
+            rowClean=MenuItem(rowMenu,"Clean Install Database from source…",async(s,e)=>await StartBuild(connectionCard,true,rowMenuDatabases.ToArray()));
+            rowChoose=MenuItem(rowMenu,"Choose database file…",(s,e)=>ChooseBackup());rowEdit=MenuItem(rowMenu,"Edit game…",(s,e)=>EditGame(true));
+            rowMenu.Items.Add(new ToolStripSeparator());rowProperties=MenuItem(rowMenu,"Properties…",(s,e)=>ShowProperties());
+            rowMenu.Items.Add(new ToolStripSeparator());rowRemove=MenuItem(rowMenu,"Remove Database…",async(s,e)=>await StartRemove(rowMenuDatabases.ToArray()));rowRemove.ForeColor=Color.Firebrick;
+            filesMenuButton.Click+=(s,e)=>{if(fileSearch!=null){fileSearch.Cancel();filesMenuButton.Enabled=false;summary.Text="Canceling the file search…";}else filesMenu.Show(filesMenuButton,new Point(0,filesMenuButton.Height));};libraryMenuButton.Click+=(s,e)=>libraryMenu.Show(libraryMenuButton,new Point(0,libraryMenuButton.Height));
+            helpMenuButton.Click+=(s,e)=>helpMenu.Show(helpMenuButton,new Point(0,helpMenuButton.Height));selectedMenuButton.Click+=(s,e)=>selectedMenu.Show(selectedMenuButton,new Point(0,selectedMenuButton.Height));rowMenuButton.Click+=(s,e)=>rowMenu.Show(rowMenuButton,new Point(0,rowMenuButton.Height));
+            foreach(var menu in new[]{filesMenu,libraryMenu,helpMenu,selectedMenu,rowMenu}){UiTheme.ConfigureMenu(menu);menu.Opening+=(s,e)=>{if(menu==rowMenu)rowMenuDatabases=SelectedDatabases();UpdateActionButtons();if(busy || scanning || (menu==rowMenu && rowMenuDatabases.Length==0))e.Cancel=true;};}
+            filesMenu.Opening+=(s,e)=>{filesMenu.Items[0].Enabled=choose.Enabled;};
+        }
+        string SelectedDatabase(){return list.SelectedItems.Count==1?list.SelectedItems[0].Name:null;}
+        string[] SelectedDatabases(){return list.SelectedItems.Cast<ListViewItem>().Select(row=>row.Name).ToArray();}
+        ListViewItem[] ActionRows(string[] targetDatabases=null,bool allDatabases=false)
+        {
+            var names=targetDatabases==null?null:new HashSet<string>(targetDatabases,StringComparer.Ordinal);
+            return list.Items.Cast<ListViewItem>().Where(row=>names!=null?names.Contains(row.Name):allDatabases || row.Checked).ToArray();
+        }
+        Entry[] BackupTargets(bool allDatabases,string[] targetDatabases=null)
+        {return ActionRows(targetDatabases,allDatabases).Select(row=>row.Tag as Entry).Where(entry=>entry!=null && entry.databaseInstalled).ToArray();}
+        static string DatabaseActionText(string action,int eligible,bool multiple,bool confirmation=false)
+        {return action+(multiple?" ("+eligible+") Database"+(eligible==1?"":"s"):" Database")+(confirmation?"…":"");}
+        void OpenLatestReport()
+        {try{if(File.Exists(engine.LastReportPath))Process.Start(new ProcessStartInfo(Path.GetDirectoryName(engine.LastReportPath)){UseShellExecute=true});else summary.Text="The latest report is no longer available.";}catch(Exception ex){summary.Text="Could not open the report: "+ex.Message;}}
+        void OpenBackupFolder(string database)
+        {
+            try{
+                string folder=engine.UserBackupDirectory;
+                if(database!=null){var latest=engine.LatestBackup(CurrentConnection(),database);if(latest==null){summary.Text="There is no available backup for this game on this connection.";return;}folder=Path.GetDirectoryName(engine.BackupRecordPath(latest));}
+                if(Directory.Exists(folder))Process.Start(new ProcessStartInfo(folder){UseShellExecute=true});else summary.Text="Use Backup databases to save your first backup.";
+            }catch(Exception ex){summary.Text="Could not open backups: "+ex.Message;}
+        }
+        async void ShowProperties()
+        {
+            if(busy || scanning || SelectedDatabase()==null)return;
+            string database=SelectedDatabase();
+            try{using(var dialog=new DatabasePropertiesForm(engine,CurrentConnection(),list.SelectedItems[0].Tag as Entry,databasesChecked,!restartRequired && Engine.ToolsPresent(pgBin.Text))){dialog.ShowDialog(this);if(dialog.RestoreSelection!=null)await RestoreBackup(database,dialog.RestoreSelection);else if(dialog.HistoryChanged)await Scan();}}catch(Exception ex){summary.Text="Could not open properties: "+ex.Message;}
+        }
+        async void ShowBackupPicker()
+        {
+            if(busy || scanning || restartRequired || !databasesChecked || SelectedDatabase()==null)return;
+            string database=SelectedDatabase();
+            try{using(var dialog=new BackupPickerForm(engine,CurrentConnection(),database,list.SelectedItems[0].Text)){dialog.ShowDialog(this);if(dialog.RestoreSelection!=null)await RestoreBackup(database,dialog.RestoreSelection);}}catch(Exception ex){summary.Text="Could not open backups: "+ex.Message;}
+        }
+        async Task RestoreBackup(string database,DatabaseBackup record)
+        {
+            if(busy || scanning || restartRequired || !await Scan() || !databasesChecked)return;
+            try{
+                var row=list.Items[database];if(row==null)throw new Exception("This game is no longer in the library.");
+                bool installed=((Entry)row.Tag).databaseInstalled;
+                var restore=engine.PrepareRecordedRestore(CurrentConnection(),database,record);
+                if(installed && !ConfirmOverwrite(new[]{new Entry {database=((Entry)row.Tag).database,backup=restore.Path}}))return;
+                engine.SelectRecordedBackup(CurrentConnection(),database,record);
+                await StartBuild(connectionCard,installed,new[]{database},restore);
+            }catch(Exception ex){summary.Text="Restore stopped: "+ex.Message;MessageBox.Show(this,summary.Text,"Restore backup",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
+        }
+        void UpdateBackupStatus(ListViewItem row)
+        {
+            while(row.SubItems.Count<5)row.SubItems.Add("");
+            row.SubItems[4].Text=engine.BackupStatus(CurrentConnection(),row.Name);
+            if(row.Tag is Entry)row.SubItems[3].Text=BackupText((Entry)row.Tag);
+            var latest=engine.BackupHistory(CurrentConnection(),row.Name).FirstOrDefault();
+            if(latest!=null){string path=engine.BackupRecordPath(latest);row.ToolTipText+="\r\nLast backed up: "+DateTimeOffset.Parse(latest.createdUtc,CultureInfo.InvariantCulture).ToLocalTime().ToString("f")+"\r\n"+path+(File.Exists(path)?"":" (file missing)")+"\r\nA backup is a snapshot; changes made later are not included.";}
+        }
+        void RowMouseDown(object sender,MouseEventArgs e)
+        {
+            if(busy || scanning || e.Button!=MouseButtons.Right)return;
+            var hit=list.HitTest(e.Location);
+            if(hit.Item==null){list.SelectedItems.Clear();rowMenuDatabases=new string[0];rowMenu.Close();return;}
+            if(!hit.Item.Selected){list.SelectedItems.Clear();hit.Item.Selected=true;}
+            hit.Item.Focused=true;
+            // Native left clicks retain Shift/Ctrl range selection. Checkboxes
+            // remain independent from the highlighted row actions.
         }
         void ConnectionChanged(){if(!loadingConnection){connectionEdited=true;MarkConnectionUnverified();}}
         bool PersistPassword()
@@ -1286,12 +1616,13 @@ namespace ITDatabaseSetup
                 dialog.ShowDialog(this);try{engine.SaveWelcomePreference(dialog.DontShowAgain);}catch(Exception ex){summary.Text="Could not save the welcome preference: "+ex.Message;}
             }
         }
-        Control[] WorkControls() {return new Control[]{build,clean,remove,refresh,connect,choose,autoLoad,addGame,editGame,editInfo,installHelp,welcome,selectAll,clearAll,list,server.Parent};}
+        Control[] WorkControls() {return new Control[]{build,clean,remove,backup,openBackups,refresh,connect,choose,autoLoad,addGame,editGame,editInfo,installHelp,welcome,selectAll,clearAll,list,connectionCard,filesMenuButton,libraryMenuButton,helpMenuButton,selectedMenuButton,rowMenuButton};}
         void MarkConnectionUnverified()
         {
             if(loadingConnection || busy || scanning)return;
             databasesChecked=false;
             UpdateActionButtons();
+            foreach(ListViewItem row in list.Items)try{UpdateBackupStatus(row);}catch{row.SubItems[4].Text="Unavailable";}
             summary.Text="Connection settings changed. Selections are preserved; displayed results are from the last check.\r\nClick Reload to verify the settings and enable the applicable actions.";
         }
         void UpdateSelectAll()
@@ -1306,9 +1637,28 @@ namespace ITDatabaseSetup
             build.Enabled=ready && selected.Any(entry=>!entry.databaseInstalled && entry.backup!=null);
             clean.Enabled=ready && selected.Any(entry=>entry.databaseInstalled && entry.backup!=null);
             remove.Enabled=ready && selected.Any(entry=>entry.databaseInstalled);
+            bool canBackup=ready && File.Exists(Path.Combine(pgBin.Text,"pg_dump.exe"));
+            backup.Enabled=canBackup && list.Items.Cast<ListViewItem>().Any(row=>row.Tag is Entry && ((Entry)row.Tag).databaseInstalled);
+            openBackups.Enabled=!busy && !scanning;
             choose.Enabled=!busy && !scanning && list.SelectedItems.Count==1;
-            build.BackColor=build.Enabled?Color.FromArgb(28,93,178):SystemColors.Control;
-            build.ForeColor=build.Enabled?Color.White:SystemColors.GrayText;
+            selectionSummary.Text=selected.Length+" checked  ·  "+list.SelectedItems.Count+" highlighted";
+            if(selectedBackup!=null){
+                selectedBackup.Enabled=canBackup && selected.Any(entry=>entry.databaseInstalled);selectedClean.Enabled=clean.Enabled;selectedRemove.Enabled=remove.Enabled;
+                selectedMenuButton.Enabled=!busy && !scanning && selected.Length>0;
+                Entry[] highlighted=list.SelectedItems.Cast<ListViewItem>().Select(row=>row.Tag as Entry).Where(entry=>entry!=null).ToArray();
+                Entry rowEntry=list.SelectedItems.Count==1?highlighted.FirstOrDefault():null;
+                int installed=highlighted.Count(entry=>entry.databaseInstalled),installable=highlighted.Count(entry=>!entry.databaseInstalled && entry.backup!=null),cleanable=highlighted.Count(entry=>entry.databaseInstalled && entry.backup!=null);
+                bool multiple=list.SelectedItems.Count>1;
+                int count=highlighted.Length;
+                rowBackup.Text=DatabaseActionText("Back Up",count,multiple);rowInstall.Text=DatabaseActionText("Install",count,multiple);
+                rowClean.Text=DatabaseActionText("Clean Install",count,multiple)+" from source…";rowRemove.Text=DatabaseActionText("Remove",count,multiple,true);
+                rowBackup.Enabled=canBackup && count>0 && installed==count;rowInstall.Enabled=ready && count>0 && installable==count;
+                rowClean.Enabled=ready && count>0 && cleanable==count;rowRemove.Enabled=ready && count>0 && installed==count;
+                rowProperties.Enabled=rowChoose.Enabled=rowEdit.Enabled=!busy && !scanning && rowEntry!=null;
+                rowMenuButton.Enabled=!busy && !scanning && highlighted.Length>0;
+                try{rowOpenBackup.Enabled=rowProperties.Enabled && engine.LatestBackup(CurrentConnection(),rowEntry.requestedDatabase)!=null;}catch{rowOpenBackup.Enabled=false;}
+                rowRestore.Enabled=ready && rowOpenBackup.Enabled;
+            }
             refresh.Enabled=!busy && !scanning;
             connect.Enabled=!busy && !scanning;
             reportButton.Enabled=!busy && !scanning && File.Exists(engine.LastReportPath);
@@ -1316,7 +1666,7 @@ namespace ITDatabaseSetup
         bool ConfirmOverwrite(IEnumerable<Entry> entries)
         {
             Entry[] games=entries.ToArray();
-            if(MessageBox.Show(this,"These databases are already installed:\r\n\r\n"+String.Join("\r\n",games.Select(entry=>entry.database))+"\r\n\r\nAre you sure you want to overwrite them with a clean install from their original database files?\r\n\r\nThe current databases will be kept as recovery copies. A failed restore will leave the current databases unchanged. Close games and pgAdmin connections using these databases first.","Overwrite installed databases?",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)!=DialogResult.Yes)return false;
+            if(MessageBox.Show(this,"These databases are already installed:\r\n\r\n"+String.Join("\r\n\r\n",games.Select(entry=>entry.database+"\r\n"+entry.backup))+"\r\n\r\nRestore them from these selected database files?\r\n\r\nThe current databases will be kept as recovery copies. A failed restore will leave the current databases unchanged. Close games and pgAdmin connections using these databases first.","Overwrite installed databases?",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)!=DialogResult.Yes)return false;
             return true;
         }
         async Task ShowInstallHelp()
@@ -1342,7 +1692,8 @@ namespace ITDatabaseSetup
         }
         async void ChooseBackup()
         {
-            if(list.SelectedItems.Count!=1){summary.Text="Select the game in the list first, then click Add database file, or click its database file path.";return;}
+            if(busy || scanning)return;
+            if(list.SelectedItems.Count!=1){summary.Text="Select one game, then right-click and choose its database file.";return;}
             ListViewItem row=list.SelectedItems[0];
             try{
                 Game game=engine.catalog.Single(g=>g.database==row.Name);
@@ -1361,10 +1712,10 @@ namespace ITDatabaseSetup
             using(var dialog=new FolderBrowserDialog {Description="Choose your games folder. All subfolders will be searched for extracted database files.",ShowNewFolderButton=false,SelectedPath=lastGamesFolder??engine.root}){
                 if(dialog.ShowDialog(this)!=DialogResult.OK)return;folder=dialog.SelectedPath;lastGamesFolder=folder;
             }
-            Control[] locked=WorkControls().Where(control=>control!=autoLoad).ToArray();
+            Control[] locked=WorkControls().Where(control=>control!=autoLoad && control!=filesMenuButton).ToArray();
             bool[] enabled=locked.Select(control=>control.Enabled).ToArray();
             foreach(Control control in locked)control.Enabled=false;
-            busy=true;UpdateActionButtons();fileSearch=new CancellationTokenSource();autoLoad.Text="Cancel file search";progress.Style=ProgressBarStyle.Marquee;
+            busy=true;UpdateActionButtons();fileSearch=new CancellationTokenSource();autoLoad.Text="Cancel file search";filesMenuButton.Text="Cancel search";filesMenuButton.Enabled=true;progress.Style=ProgressBarStyle.Marquee;
             FileLoadResult result=null;string error=null;
             Stopwatch updates=Stopwatch.StartNew();
             Action<string> update=message=>{if(updates.ElapsedMilliseconds<250)return;updates.Restart();if(!IsDisposed)BeginInvoke(new Action(()=>{if(fileSearch!=null)summary.Text=message;}));};
@@ -1372,7 +1723,7 @@ namespace ITDatabaseSetup
             catch(Exception ex){error=ex.Message;}
             finally{
                 busy=false;fileSearch.Dispose();fileSearch=null;
-                if(!IsDisposed){autoLoad.Text="Auto-Find database files";autoLoad.Enabled=true;progress.Style=ProgressBarStyle.Blocks;for(int i=0;i<locked.Length;i++)locked[i].Enabled=enabled[i];UpdateActionButtons();}
+                if(!IsDisposed){autoLoad.Text="Auto-Find database files";autoLoad.Enabled=true;filesMenuButton.Text="Add files  ▾";filesMenuButton.Enabled=true;progress.Style=ProgressBarStyle.Blocks;for(int i=0;i<locked.Length;i++)locked[i].Enabled=enabled[i];UpdateActionButtons();}
             }
             if(IsDisposed)return;
             await Scan();string checkedState=summary.Text;
@@ -1383,6 +1734,7 @@ namespace ITDatabaseSetup
         }
         async void EditGame(bool editExisting)
         {
+            if(busy || scanning)return;
             try{
                 string selected=editExisting && list.SelectedItems.Count==1?list.SelectedItems[0].Name:null;
                 if(editExisting && selected==null){summary.Text="Select the game row first, then click Edit game.";return;}
@@ -1407,8 +1759,10 @@ namespace ITDatabaseSetup
                     if(!passwordEdited)password.Text=engine.InfoField("Password")??"";
                 }finally{loadingConnection=false;}
                 var checks=list.Items.Cast<ListViewItem>().ToDictionary(row=>row.Name,row=>row.Checked);
+                var highlighted=new HashSet<string>(SelectedDatabases(),StringComparer.Ordinal);
+                string focusedDatabase=list.FocusedItem==null?null:list.FocusedItem.Name;
                 list.Items.Clear(); Entry[] entries=engine.Inventory();
-                foreach(Entry e in entries){ListViewItem row=new ListViewItem(e.game);row.Name=e.requestedDatabase;row.Tag=e;row.StateImageIndex=0;row.Checked=checks.ContainsKey(row.Name) && checks[row.Name];row.SubItems.Add(e.database);row.SubItems.Add(DisplayStatus(e.status));row.SubItems.Add(BackupText(e));row.ToolTipText=e.detail??e.backup??BackupText(e);list.Items.Add(row);}
+                foreach(Entry e in entries){ListViewItem row=new ListViewItem(e.game);row.Name=e.requestedDatabase;row.Tag=e;row.StateImageIndex=0;row.Checked=checks.ContainsKey(row.Name) && checks[row.Name];row.SubItems.Add(e.database);row.SubItems.Add(DisplayStatus(e.status));row.SubItems.Add(BackupText(e));row.ToolTipText=e.detail??e.backup??BackupText(e);UpdateBackupStatus(row);list.Items.Add(row);row.Selected=highlighted.Contains(row.Name);if(row.Name==focusedDatabase){row.Focused=true;row.EnsureVisible();}}
                 list.ShowItemToolTips=true;
                 int found=entries.Count(e=>e.backup!=null);
                 if(!checkInstalled)return true;
@@ -1430,11 +1784,14 @@ namespace ITDatabaseSetup
                     }
                     databasesChecked=true;
                     int repair=entries.Count(entry=>entry.databaseNeedsRepair);
-                    summary.Text=present+" databases present; "+repair+" need repair; "+found+" database files found. Check games to choose an action.\r\n"+(engine.FileScanWarnings.Count>0?engine.FileScanWarnings.Count+" files or folders could not be read; other files were checked. ":"")+"Install skips existing databases. Clean install restores them; Remove deletes them.";
+                    inventorySummary.Text=present+" installed  ·  "+found+" source files  ·  "+entries.Length+" games";
+                    summary.Text=repair>0?repair+" databases need repair. Right-click a game to review its properties.":"Backup databases saves every installed game. Use Shift/Ctrl to highlight games and right-click for batch actions, or check games for Selected actions.";
+                    if(engine.FileScanWarnings.Count>0)summary.Text+="\r\n"+engine.FileScanWarnings.Count+" files or folders could not be read; other files were checked.";
                 }catch(Exception ex){
                     if(IsDisposed)return false;
                     string status=DatabaseCheckStatus(ex.Message,password.Text,Engine.ToolsPresent(pgBin.Text));
                     foreach(ListViewItem row in list.Items){row.SubItems[2].Text=status;row.ForeColor=Color.Red;row.ToolTipText="Could not check whether this database is installed. "+ex.Message;}
+                    inventorySummary.Text="Connection needs attention  ·  "+entries.Length+" games in your library";
                     summary.Text="Installed databases could not be checked. "+ex.Message+"\r\nCorrect the connection or password, then click Reload. "+found+" database files found.";
                 }
                 return true;
@@ -1452,6 +1809,8 @@ namespace ITDatabaseSetup
         }
         string BackupText(Entry entry)
         {
+            var latest=engine.BackupHistory(CurrentConnection(),entry.requestedDatabase).FirstOrDefault();
+            if(latest!=null)return "\\pg_backup\\"+latest.file.Substring(latest.file.IndexOf('/')+1).Replace('/', '\\');
             if(!String.IsNullOrEmpty(entry.backup)){
                 string prefix=engine.BackupDirectory+Path.DirectorySeparatorChar;
                 return entry.backup.StartsWith(prefix,StringComparison.OrdinalIgnoreCase)?"\\pg_backup\\"+entry.backup.Substring(prefix.Length):entry.backup;
@@ -1473,6 +1832,8 @@ namespace ITDatabaseSetup
                 row.SubItems[3].Text=BackupText(entry);row.ForeColor=entry.backup!=null?Color.Black:Color.Red;
                 row.ToolTipText=entry.detail??(entry.backup!=null?"Ready to install from: "+entry.backup:BackupText(entry));
             }
+            if(!String.IsNullOrEmpty(entry.initialBackupError))row.ToolTipText+="\r\nInitial backup needs attention: "+entry.initialBackupError;
+            UpdateBackupStatus(row);
         }
         static string DisplayStatus(string status)
         {
@@ -1483,28 +1844,38 @@ namespace ITDatabaseSetup
             if(IsDisposed)return;
             if(InvokeRequired){BeginInvoke(new Action<Entry>(UpdateEntry),entry);return;}
             ListViewItem row=list.Items[entry.requestedDatabase];
-            if(row==null){row=new ListViewItem(entry.game);row.Name=entry.requestedDatabase;row.SubItems.Add(entry.database);row.SubItems.Add(entry.status);row.SubItems.Add("");list.Items.Add(row);}
+            if(row==null){row=new ListViewItem(entry.game);row.Name=entry.requestedDatabase;row.SubItems.Add(entry.database);row.SubItems.Add(entry.status);row.SubItems.Add("");row.SubItems.Add("");list.Items.Add(row);}
             row.SubItems[1].Text=entry.database;row.SubItems[2].Text=DisplayStatus(entry.status);row.ToolTipText=entry.detail;
             row.SubItems[3].Text=BackupText(entry);
             row.ForeColor=entry.status.Contains("review") || entry.status=="Needs review" ? Color.FromArgb(152,79,0) : (entry.status=="Imported"?Color.DarkGreen:Color.Black);
             if(entry.status=="Already present" || entry.status=="Imported" || entry.status=="Clean installed"){
                 Entry previous=row.Tag as Entry;
-                Entry state=new Entry {game=entry.game,requestedDatabase=entry.requestedDatabase,database=entry.database,backup=entry.backup??(previous==null?null:previous.backup),databaseNeedsRepair=entry.status=="Already present" && previous!=null && previous.databaseNeedsRepair,databaseHealthDetail=previous==null?null:previous.databaseHealthDetail};
+                Entry state=new Entry {game=entry.game,requestedDatabase=entry.requestedDatabase,database=entry.database,backup=entry.backup??(previous==null?null:previous.backup),databaseNeedsRepair=entry.status=="Already present" && previous!=null && previous.databaseNeedsRepair,databaseHealthDetail=previous==null?null:previous.databaseHealthDetail,initialBackupError=entry.initialBackupError};
                 ShowDatabaseState(row,state,entry.database);
             }else if(entry.status=="Waiting for backup" || entry.status=="Choose backup")ShowDatabaseState(row,entry,null);
             syncingChecks=true;try{row.Checked=false;}finally{syncingChecks=false;UpdateSelectAll();}
             row.EnsureVisible();summary.Text=entry.game+": "+DisplayStatus(entry.status);
         }
-        async Task StartBuild(Control connectionPanel,bool cleanInstall=false)
+        static string BuildCompletionText(Report report)
         {
-            if(busy || scanning)return;
+            int imported=report.entries.Count(e=>e.status=="Imported"||e.status=="Clean installed"),review=report.entries.Count(e=>e.status.Contains("review")||e.status=="Needs review"),kept=report.entries.Count(e=>e.status=="Already present"),waiting=report.entries.Count(e=>e.status=="Waiting for backup"),choices=report.entries.Count(e=>e.status=="Choose backup"),backupWarnings=report.entries.Count(e=>!String.IsNullOrEmpty(e.initialBackupError));
+            return "Finished: "+imported+" imported, "+review+" need review, "+kept+" already present, "+waiting+" waiting, "+choices+" need a database file choice"+(backupWarnings>0?", "+backupWarnings+(backupWarnings==1?" initial backup needs attention":" initial backups need attention"):"")+".\r\n"+(backupWarnings>0?"Games with backup warnings installed successfully. Open latest report to review the initial backup problems. ":"")+(review>0?"Open latest report to review restore errors before assuming the games are ready.":backupWarnings==0?"Add more database files and run again whenever you want.":"");
+        }
+        async Task StartBuild(Control connectionPanel,bool cleanInstall=false,string[] targetDatabases=null,ConfirmedBackupRestore confirmedRestore=null)
+        {
+            if(busy || scanning || restartRequired)return;
+            targetDatabases=targetDatabases==null?null:targetDatabases.ToArray();
             if(!await Scan() || !databasesChecked)return;
-            string[] selected=list.CheckedItems.Cast<ListViewItem>().Select(row=>row.Name).ToArray();
-            if(selected.Length==0){summary.Text="Check the games you want first.";return;}
-            Entry[] cleanEntries=cleanInstall?list.CheckedItems.Cast<ListViewItem>().Select(row=>row.Tag as Entry).Where(entry=>entry!=null && entry.databaseInstalled && entry.backup!=null).ToArray():new Entry[0];
+            if(confirmedRestore!=null){try{engine.ValidateConfirmedRestore(CurrentConnection(),confirmedRestore);}catch(Exception ex){summary.Text=ex.Message;return;}}
+            ListViewItem[] scope=ActionRows(targetDatabases);
+            if(targetDatabases!=null && (scope.Length!=targetDatabases.Length || scope.Any(row=>!(row.Tag is Entry) || ((Entry)row.Tag).backup==null || ((Entry)row.Tag).databaseInstalled!=cleanInstall))){summary.Text="This action must apply to every highlighted database. Refresh and select a compatible group.";return;}
+            if(targetDatabases!=null && !cleanInstall)scope=scope.Where(row=>row.Tag is Entry && !((Entry)row.Tag).databaseInstalled && ((Entry)row.Tag).backup!=null).ToArray();
+            string[] selected=scope.Select(row=>row.Name).ToArray();
+            if(selected.Length==0){summary.Text=targetDatabases==null?"Check the games you want first.":"None of the highlighted games has a database file ready to install.";return;}
+            Entry[] cleanEntries=cleanInstall?scope.Select(row=>row.Tag as Entry).Where(entry=>entry!=null && entry.databaseInstalled && entry.backup!=null).ToArray():new Entry[0];
             if(cleanInstall){
                 if(cleanEntries.Length==0){summary.Text="Clean install needs an installed database and its original database file. Add the file first.";return;}
-                selected=cleanEntries.Select(entry=>entry.requestedDatabase).ToArray();if(!ConfirmOverwrite(cleanEntries))return;
+                selected=cleanEntries.Select(entry=>entry.requestedDatabase).ToArray();if(confirmedRestore==null && !ConfirmOverwrite(cleanEntries))return;
             }
             Connection c;
             string secret;
@@ -1517,18 +1888,45 @@ namespace ITDatabaseSetup
             try {
                 busy=true;foreach(Control control in locked)control.Enabled=false;UpdateActionButtons();progress.Style=ProgressBarStyle.Marquee;
                 engine.SaveConnection(c);
-                Report report=await Task.Run(()=>engine.Build(c,secret,false,UpdateEntry,selected,cleanEntries.Select(entry=>entry.requestedDatabase)));
-                int imported=report.entries.Count(e=>e.status=="Imported"||e.status=="Clean installed"), review=report.entries.Count(e=>e.status.Contains("review")||e.status=="Needs review"), kept=report.entries.Count(e=>e.status=="Already present"), waiting=report.entries.Count(e=>e.status=="Waiting for backup"), choices=report.entries.Count(e=>e.status=="Choose backup");
-                summary.Text="Finished: "+imported+" imported, "+review+" need review, "+kept+" already present, "+waiting+" waiting, "+choices+" need a database file choice.\r\n"+(review>0?"Open latest report to review restore errors before assuming the games are ready.":"Add more database files and run again whenever you want.");
+                Report report=await Task.Run(()=>engine.Build(c,secret,false,UpdateEntry,selected,cleanEntries.Select(entry=>entry.requestedDatabase),confirmedRestore));
+                summary.Text=BuildCompletionText(report);
             } catch(Exception ex){summary.Text=ex.Message;MessageBox.Show(this,ex.Message,"Database setup stopped",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
             finally{secret=null;busy=false;for(int i=0;i<locked.Length;i++)locked[i].Enabled=enabled[i];progress.Style=ProgressBarStyle.Blocks;UpdateActionButtons();}
             string completed=summary.Text;await Scan();summary.Text=completed;
         }
-        async Task StartRemove()
+        async Task StartBackup(bool allDatabases=true,string[] targetDatabases=null)
         {
-            if(busy || scanning || !await Scan() || !databasesChecked)return;
-            Entry[] selected=list.CheckedItems.Cast<ListViewItem>().Select(row=>row.Tag as Entry).Where(entry=>entry!=null && entry.databaseInstalled).ToArray();
-            if(selected.Length==0){summary.Text="Check an installed database to remove it.";return;}
+            if(busy || scanning || restartRequired)return;
+            targetDatabases=targetDatabases==null?null:targetDatabases.ToArray();
+            if(!await Scan() || !databasesChecked)return;
+            Entry[] selected=BackupTargets(allDatabases,targetDatabases);
+            if(targetDatabases!=null && selected.Length!=targetDatabases.Length){summary.Text="Back Up requires every highlighted database to be installed. Refresh and select a compatible group.";return;}
+            if(selected.Length==0){summary.Text=targetDatabases!=null?"None of the highlighted games has an installed database to back up.":allDatabases?"There are no installed game databases to back up.":"Check installed games to back up their current databases.";return;}
+            var connection=new Connection {server=server.Text.Trim(),port=(int)port.Value,username=user.Text.Trim(),pgBin=Engine.DetectTools(pgBin.Text.Trim())};
+            if(!Engine.ToolsPresent(connection.pgBin) || !File.Exists(Path.Combine(connection.pgBin,"pg_dump.exe"))){summary.Text="Select the PostgreSQL 8.3 tools, including pg_dump, before backing up databases.";return;}
+            string action="ask",secret=password.Text;
+            try{
+                var existing=selected.Select(entry=>engine.LatestBackup(connection,entry.requestedDatabase)).Where(item=>item!=null).ToArray();
+                if(existing.Length>0)using(var dialog=new BackupChoiceForm(existing)){if(dialog.ShowDialog(this)!=DialogResult.OK)return;action=dialog.ExistingAction;}
+            }catch(Exception ex){summary.Text=ex.Message;return;}
+            Control[] locked=WorkControls();bool[] enabled=locked.Select(control=>control.Enabled).ToArray();
+            try{
+                busy=true;foreach(Control control in locked)control.Enabled=false;UpdateActionButtons();progress.Style=ProgressBarStyle.Marquee;
+                summary.Text="Backing up "+selected.Length+" installed game databases…";engine.SaveConnection(connection);
+                Report report=await Task.Run(()=>engine.BackupDatabases(connection,secret,selected.Select(entry=>entry.requestedDatabase),action,entry=>{if(!IsDisposed)BeginInvoke(new Action(()=>{summary.Text=entry.game+": "+entry.status;}));}));
+                summary.Text="Finished: "+report.entries.Count(entry=>entry.status=="Backed up")+" backed up; "+report.entries.Count(entry=>entry.status=="Needs review")+" need review.\r\nOpen backups to view the files. Use Add database file to select one for a later restore.";
+            }catch(Exception ex){summary.Text="Backup stopped: "+ex.Message;}
+            finally{secret=null;busy=false;for(int i=0;i<locked.Length;i++)locked[i].Enabled=enabled[i];progress.Style=ProgressBarStyle.Blocks;UpdateActionButtons();}
+            string completed=summary.Text;await Scan();summary.Text=completed;
+        }
+        async Task StartRemove(string[] targetDatabases=null)
+        {
+            if(busy || scanning || restartRequired)return;
+            targetDatabases=targetDatabases==null?null:targetDatabases.ToArray();
+            if(!await Scan() || !databasesChecked)return;
+            Entry[] selected=ActionRows(targetDatabases).Select(row=>row.Tag as Entry).Where(entry=>entry!=null && entry.databaseInstalled).ToArray();
+            if(targetDatabases!=null && selected.Length!=targetDatabases.Length){summary.Text="Remove requires every highlighted database to be installed. Refresh and select a compatible group.";return;}
+            if(selected.Length==0){summary.Text=targetDatabases==null?"Check an installed database to remove it.":"None of the highlighted games has an installed database to remove.";return;}
             if(MessageBox.Show(this,"Permanently remove these installed databases?\r\n\r\n"+String.Join("\r\n",selected.Select(entry=>entry.database))+"\r\n\r\nThis deletes their saved progress and scores. Your original database files and any recovery copies will be kept. You can reinstall from the original files afterward.","Remove selected databases?",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)!=DialogResult.Yes)return;
             var connection=new Connection {server=server.Text.Trim(),port=(int)port.Value,username=user.Text.Trim(),pgBin=Engine.DetectTools(pgBin.Text.Trim())};
             string secret=password.Text;
@@ -1574,7 +1972,7 @@ namespace ITDatabaseSetup
                     else if(args.Contains("--check-games"))Console.WriteLine(Engine.Json.Serialize(engine.CheckInstalledGames(check,secret,engine.Inventory())));
                     else Console.WriteLine(Engine.Json.Serialize(Engine.InstalledDatabases(check,secret)));return 0;
                 }
-                if(args.Contains("--plan") || args.Contains("--build") || args.Contains("--remove"))
+                if(args.Contains("--plan") || args.Contains("--build") || args.Contains("--remove") || args.Contains("--backup"))
                 {
                     Connection connection=engine.LoadConnection();
                     for(int i=0;i<args.Length;i++){
@@ -1588,7 +1986,10 @@ namespace ITDatabaseSetup
                     if(only>=0){if(only+1>=args.Length)throw new Exception("Use --only DatabaseName,OtherDatabaseName.");selected=args[only+1].Split(',');}
                     int overwrite=Array.IndexOf(args,"--overwrite-confirmed");string[] clean=null;
                     if(overwrite>=0){if(overwrite+1>=args.Length || selected==null)throw new Exception("Use --overwrite-confirmed DatabaseName with --only after confirming a clean install.");clean=args[overwrite+1].Split(',');}
-                    Report report=args.Contains("--remove")?engine.RemoveDatabases(connection,secret,selected,args.Contains("--remove-confirmed"),e=>{},args.Contains("--plan")):engine.Build(connection,secret,args.Contains("--plan"),e=>{},selected,clean);
+                    if(args.Contains("--backup") && (args.Contains("--remove") || args.Contains("--build") || args.Contains("--plan") || clean!=null))throw new Exception("Run --backup separately from install, remove and preview operations.");
+                    int backupExisting=Array.IndexOf(args,"--backup-existing");
+                    if(backupExisting>=0 && backupExisting+1>=args.Length)throw new Exception("Use --backup-existing keep or --backup-existing overwrite.");
+                    Report report=args.Contains("--backup")?engine.BackupDatabases(connection,secret,selected,backupExisting<0?"ask":args[backupExisting+1],e=>{}):args.Contains("--remove")?engine.RemoveDatabases(connection,secret,selected,args.Contains("--remove-confirmed"),e=>{},args.Contains("--plan")):engine.Build(connection,secret,args.Contains("--plan"),e=>{},selected,clean);
                     Console.WriteLine(Engine.Json.Serialize(report));return 0;
                 }
                 Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new SetupForm(engine));return 0;
