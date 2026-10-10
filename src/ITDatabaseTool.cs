@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -101,7 +101,7 @@ namespace ITDatabaseSetup
     }
     internal sealed class ToolResult { public int code; public string output; public string error; }
     internal sealed class BackupChoiceException : Exception { public BackupChoiceException(string text):base(text){} }
-    public sealed class UserSettings { public bool hideWelcome; }
+    public sealed class UserSettings { public bool hideWelcome; public DefinitionConnection connection; }
     public sealed class InstallRecord
     {
         public string server,database,databaseOid,status,detail,reportPath;
@@ -114,6 +114,7 @@ namespace ITDatabaseSetup
         public Game[] catalog;
         DatabaseDefinition definition;
         public string DefinitionPath;
+        public string SettingsPath { get { return Path.Combine(root,"UserSettings.json"); } }
         public string LastReportPath;
         string[] backupFiles;
         Dictionary<string,string> hashes=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -128,9 +129,49 @@ namespace ITDatabaseSetup
         public static string ExpectedBackupPath(Game game) {return "\\"+game.backup.Replace('/','\\');}
         public bool HideWelcome()
         {
-            try{return Json.Deserialize<UserSettings>(File.ReadAllText(Path.Combine(root,"UserSettings.json"))).hideWelcome;}catch{return false;}
+            var settings=ReadUserSettings();
+            return settings.ContainsKey("hideWelcome") && (bool)settings["hideWelcome"];
         }
-        public void SaveWelcomePreference(bool hide) {AtomicText(Path.Combine(root,"UserSettings.json"),PrettyJson(new UserSettings {hideWelcome=hide}));}
+        public void SaveWelcomePreference(bool hide)
+        {
+            var settings=ReadUserSettings();settings["hideWelcome"]=hide;SaveUserSettings(settings);
+        }
+        Dictionary<string,object> ReadUserSettings()
+        {
+            if(!File.Exists(SettingsPath))return new Dictionary<string,object>();
+            try{
+                var settings=Json.DeserializeObject(File.ReadAllText(SettingsPath)) as Dictionary<string,object>;
+                if(settings==null || (settings.ContainsKey("hideWelcome") && !(settings["hideWelcome"] is bool)))throw new Exception();
+                if(settings.ContainsKey("connection"))SettingsConnection(settings);
+                return settings;
+            }catch{throw new Exception("Cannot read UserSettings.json. Check its connection fields and JSON syntax, or restore a valid copy. Your settings have not been replaced.");}
+        }
+        static DefinitionConnection SettingsConnection(Dictionary<string,object> settings)
+        {
+            object raw;
+            if(!settings.TryGetValue("connection",out raw))return new DefinitionConnection();
+            var fields=raw as Dictionary<string,object>;
+            // Values written in this process may already be typed; loaded JSON is a dictionary.
+            DefinitionConnection connection=raw as DefinitionConnection;
+            if(connection==null){
+                CheckKeys(fields,new[]{"server","port","username","password","pgBin"},new string[0]);
+                foreach(string key in new[]{"server","username","password","pgBin"})
+                    if(fields.ContainsKey(key) && fields[key]!=null && !(fields[key] is string))throw new Exception("Invalid connection field in UserSettings.json.");
+                if(fields.ContainsKey("port") && !(fields["port"] is int))throw new Exception("Invalid connection port in UserSettings.json.");
+                connection=Json.Deserialize<DefinitionConnection>(Json.Serialize(fields));
+            }
+            ValidateStoredConnection(connection);
+            return connection;
+        }
+        static void ValidateStoredConnection(DefinitionConnection connection)
+        {
+            if(connection==null || (connection.server!="127.0.0.1" && connection.server!="localhost" && connection.server!="::1"))throw new Exception("Use a local server address in UserSettings.json: 127.0.0.1, localhost, or ::1.");
+            if(connection.port<1 || connection.port>65535 || String.IsNullOrWhiteSpace(connection.username))throw new Exception("Check connection.port and connection.username in UserSettings.json.");
+        }
+        void SaveUserSettings(Dictionary<string,object> settings)
+        {
+            SettingsConnection(settings);AtomicText(SettingsPath,PrettyJson(settings));
+        }
         public string PrepareBackupFolder(Game game)
         {
             string folder=BackupDirectory;
@@ -144,25 +185,40 @@ namespace ITDatabaseSetup
             Directory.CreateDirectory(folder);
         }
         public void PrepareBackupFolders() {ReloadDefinition();foreach(Game game in catalog)PrepareBackupFolder(game);}
-        void ReloadDefinition()
+        public void ReloadDefinition()
         {
             DefinitionPath=Path.Combine(root,"DatabaseInfo.json");
             if(!File.Exists(DefinitionPath)){
                 string legacy=Path.Combine(root,"DatabaseInfo.txt");
                 if(!File.Exists(legacy))legacy=Path.Combine(root,"Database Info.txt");
                 if(!File.Exists(legacy))throw new Exception("Place DatabaseInfo.json beside IT Database Builder.exe. An existing DatabaseInfo.txt can also be imported once.");
-                DatabaseDefinition imported=ReadLegacy(legacy);ValidateDefinition(imported);AtomicText(DefinitionPath,PrettyJson(imported));
+                DatabaseDefinition imported=ReadLegacy(legacy);ValidateDefinition(imported);
+                MigrateConnection(imported);AtomicText(DefinitionPath,DefinitionJson(imported));
             }
             DatabaseDefinition loaded;
             try{string text=File.ReadAllText(DefinitionPath);ValidateJsonKeys(text);loaded=Json.Deserialize<DatabaseDefinition>(text);}
             catch{throw new Exception("Cannot read DatabaseInfo.json. Check its field names and JSON syntax (double quotes, commas and brackets), or restore a valid copy. The old TXT file is not used when JSON exists.");}
-            ValidateDefinition(loaded);definition=loaded;catalog=loaded.games;
+            ValidateDefinition(loaded);MigrateConnection(loaded);definition=loaded;catalog=loaded.games;
+            if(loaded.connection!=null){AtomicText(DefinitionPath,DefinitionJson(loaded));loaded.connection=null;}
+        }
+        static string DefinitionJson(DatabaseDefinition value) {return PrettyJson(new {schemaVersion=value.schemaVersion,games=value.games});}
+        void MigrateConnection(DatabaseDefinition loaded)
+        {
+            var settings=ReadUserSettings();
+            if(settings.ContainsKey("connection"))return;
+            DefinitionConnection connection=loaded.connection??new DefinitionConnection();
+            ValidateStoredConnection(connection);
+            settings["connection"]=connection;
+            if(!settings.ContainsKey("hideWelcome"))settings["hideWelcome"]=false;
+            // Commit preferences first. A failed catalogue write can safely retry without
+            // replacing existing settings, including an intentionally cleared password.
+            SaveUserSettings(settings);
         }
         static void ValidateJsonKeys(string text)
         {
             var document=Json.DeserializeObject(text) as Dictionary<string,object>;
-            CheckKeys(document,new[]{"schemaVersion","connection","games"},new[]{"schemaVersion","connection","games"});
-            CheckKeys(document["connection"] as Dictionary<string,object>,new[]{"server","port","username","password","pgBin"},new string[0]);
+            CheckKeys(document,new[]{"schemaVersion","connection","games"},new[]{"schemaVersion","games"});
+            if(document.ContainsKey("connection"))CheckKeys(document["connection"] as Dictionary<string,object>,new[]{"server","port","username","password","pgBin"},new string[0]);
             var games=document["games"] as object[];if(games==null)throw new Exception();
             foreach(object game in games)CheckKeys(game as Dictionary<string,object>,new[]{"game","database","encoding","backup","backupFolder","sha256","restoreProfile","databaseFile"},new[]{"game","database","encoding","backup"});
         }
@@ -217,10 +273,6 @@ namespace ITDatabaseSetup
         static void ValidateDefinition(DatabaseDefinition value)
         {
             if(value==null || value.schemaVersion!=1)throw new Exception("DatabaseInfo.json must have schemaVersion: 1. This version of the app cannot read other schema versions.");
-            if(value.connection==null)throw new Exception("DatabaseInfo.json needs a connection object.");
-            DefinitionConnection c=value.connection;
-            if(c.server!="127.0.0.1" && c.server!="localhost" && c.server!="::1")throw new Exception("Use a local server address in DatabaseInfo.json: 127.0.0.1, localhost, or ::1.");
-            if(c.port<1 || c.port>65535 || String.IsNullOrWhiteSpace(c.username))throw new Exception("Check connection.port and connection.username in DatabaseInfo.json.");
             if(value.games==null || value.games.Length==0 || value.games.Any(g=>g==null))throw new Exception("DatabaseInfo.json needs at least one complete game entry.");
             if(value.games.Select(g=>g.database??"").Distinct(StringComparer.OrdinalIgnoreCase).Count()!=value.games.Length)throw new Exception("Use unique database names in DatabaseInfo.json.");
             foreach(Game g in value.games){
@@ -254,7 +306,7 @@ namespace ITDatabaseSetup
         }
         void SaveDefinition()
         {
-            ValidateDefinition(definition);AtomicText(DefinitionPath,PrettyJson(definition));backupFiles=null;
+            ValidateDefinition(definition);AtomicText(DefinitionPath,DefinitionJson(definition));backupFiles=null;
         }
         public void SaveGame(Game edited,string originalDatabase,string selectedBackup=null)
         {
@@ -463,10 +515,10 @@ namespace ITDatabaseSetup
         }
         public Connection LoadConnection()
         {
-            ReloadDefinition();
+            DefinitionConnection stored=SettingsConnection(ReadUserSettings());
             Connection c = new Connection();
-            c.server=definition.connection.server;c.port=definition.connection.port;c.username=definition.connection.username;
-            if(!String.IsNullOrWhiteSpace(definition.connection.pgBin))c.pgBin=definition.connection.pgBin;
+            c.server=stored.server;c.port=stored.port;c.username=stored.username;
+            if(!String.IsNullOrWhiteSpace(stored.pgBin))c.pgBin=stored.pgBin;
             c.pgBin=DetectTools(c.pgBin);
             return c;
         }
@@ -480,21 +532,21 @@ namespace ITDatabaseSetup
         }
         public void SaveConnection(Connection c)
         {
-            ValidateConnection(c);
-            // Manual UI overrides last only for this run; DatabaseInfo.json remains
-            // the sole persistent source of connection settings and game entries.
+            var settings=ReadUserSettings();DefinitionConnection stored=SettingsConnection(settings);
+            stored.server=c.server;stored.port=c.port;stored.username=c.username;stored.pgBin=c.pgBin;
+            ValidateStoredConnection(stored);settings["connection"]=stored;SaveUserSettings(settings);
         }
         public void SavePassword(string password)
         {
-            ReloadDefinition();
-            if(definition.connection.password==password)return;
-            definition.connection.password=password;SaveDefinition();
+            var settings=ReadUserSettings();DefinitionConnection stored=SettingsConnection(settings);
+            if(stored.password==password && settings.ContainsKey("connection"))return;
+            stored.password=password;settings["connection"]=stored;SaveUserSettings(settings);
         }
         public string InfoField(string field)
         {
-            ReloadDefinition();
-            if(field.Equals("Password",StringComparison.OrdinalIgnoreCase))return definition.connection.password;
-            if(field.Equals("Username",StringComparison.OrdinalIgnoreCase))return definition.connection.username;
+            DefinitionConnection stored=SettingsConnection(ReadUserSettings());
+            if(field.Equals("Password",StringComparison.OrdinalIgnoreCase))return stored.password;
+            if(field.Equals("Username",StringComparison.OrdinalIgnoreCase))return stored.username;
             return null;
         }
         static void ValidateConnection(Connection c)
@@ -663,7 +715,7 @@ namespace ITDatabaseSetup
             string[] overwrite=confirmedOverwrites==null?new string[0]:confirmedOverwrites.ToArray();
             if(overwrite.Any(name=>!selected.Any(game=>game.database==name)))throw new Exception("Clean installs must be selected and explicitly confirmed.");
             ValidateConnection(connection);
-            if (String.IsNullOrEmpty(password)) throw new Exception("Enter the PostgreSQL password or set connection.password in DatabaseInfo.json.");
+            if (String.IsNullOrEmpty(password)) throw new Exception("Enter the PostgreSQL password or set connection.password in UserSettings.json.");
             string mutexName="Local\\ITDatabaseTool_"+HashText(ServerKey(connection.server)+":"+connection.port.ToString());
             using (Mutex gate=new Mutex(false,mutexName))
             {
@@ -1156,7 +1208,7 @@ namespace ITDatabaseSetup
         CancellationTokenSource fileSearch;
         string lastGamesFolder;
         bool busy,scanning,syncingChecks,databasesChecked;
-        bool connectionEdited, loadingConnection, restartRequired;
+        bool connectionEdited, passwordEdited, loadingConnection, restartRequired;
         public SetupForm(Engine core)
         {
             engine=core; Text="IT Database Builder"; ClientSize=new Size(1000,820); MinimumSize=new Size(1016,820);
@@ -1204,7 +1256,7 @@ namespace ITDatabaseSetup
             reportButton.Click+=(s,e)=>{try{if(File.Exists(engine.LastReportPath))Process.Start(new ProcessStartInfo(Path.GetDirectoryName(engine.LastReportPath)){UseShellExecute=true});else{summary.Text="The latest report is no longer available.";UpdateActionButtons();}}catch(Exception ex){summary.Text="Could not open the report: "+ex.Message;}};
             FormClosing+=(s,e)=>{if(fileSearch!=null){fileSearch.Cancel();e.Cancel=true;summary.Text="Canceling the file search. Close the app after it finishes.";}else if(busy){e.Cancel=true; summary.Text="A database operation is running. Wait for it to finish.";}else if(!PersistPassword())e.Cancel=true;};
             server.TextChanged+=(s,e)=>ConnectionChanged();user.TextChanged+=(s,e)=>ConnectionChanged();pgBin.TextChanged+=(s,e)=>ConnectionChanged();port.ValueChanged+=(s,e)=>ConnectionChanged();
-            password.TextChanged+=(s,e)=>MarkConnectionUnverified();
+            password.TextChanged+=(s,e)=>{if(!loadingConnection)passwordEdited=true;MarkConnectionUnverified();};
             password.Leave+=(s,e)=>{if(!loadingConnection && !busy && !scanning)PersistPassword();};
             Shown+=async(s,e)=>{if(!engine.HideWelcome())ShowWelcome();await Scan();if(!IsDisposed && !Engine.ToolsPresent(pgBin.Text))await ShowInstallHelp();};
             ClientSize=new Size(1300,820);
@@ -1221,8 +1273,12 @@ namespace ITDatabaseSetup
         void ConnectionChanged(){if(!loadingConnection){connectionEdited=true;MarkConnectionUnverified();}}
         bool PersistPassword()
         {
-            try{engine.SavePassword(password.Text);return true;}
-            catch(Exception ex){summary.Text="Could not save the database password: "+ex.Message;return false;}
+            try{
+                if(connectionEdited){engine.SaveConnection(new Connection {server=server.Text.Trim(),port=(int)port.Value,username=user.Text.Trim(),pgBin=String.IsNullOrWhiteSpace(pgBin.Text)?null:pgBin.Text.Trim()});connectionEdited=false;}
+                if(passwordEdited){engine.SavePassword(password.Text);passwordEdited=false;}
+                return true;
+            }
+            catch(Exception ex){summary.Text="Could not save the connection settings: "+ex.Message;return false;}
         }
         void ShowWelcome()
         {
@@ -1330,7 +1386,7 @@ namespace ITDatabaseSetup
             try{
                 string selected=editExisting && list.SelectedItems.Count==1?list.SelectedItems[0].Name:null;
                 if(editExisting && selected==null){summary.Text="Select the game row first, then click Edit game.";return;}
-                engine.LoadConnection();Game original=editExisting?engine.catalog.Single(g=>g.database==selected):null;
+                engine.ReloadDefinition();Game original=editExisting?engine.catalog.Single(g=>g.database==selected):null;
                 using(var dialog=new GameEditorForm(engine,original))if(dialog.ShowDialog(this)==DialogResult.OK){await Scan();}
             }catch(Exception ex){summary.Text=ex.Message;}
         }
@@ -1345,7 +1401,11 @@ namespace ITDatabaseSetup
             foreach(Control control in locked)control.Enabled=false;
             UpdateActionButtons();
             try {
-                if(!connectionEdited){loadingConnection=true;try{Connection current=engine.LoadConnection();server.Text=current.server;port.Value=current.port;user.Text=current.username;pgBin.Text=current.pgBin;}finally{loadingConnection=false;}}
+                loadingConnection=true;
+                try{
+                    if(!connectionEdited){Connection current=engine.LoadConnection();server.Text=current.server;port.Value=current.port;user.Text=current.username;pgBin.Text=current.pgBin;}
+                    if(!passwordEdited)password.Text=engine.InfoField("Password")??"";
+                }finally{loadingConnection=false;}
                 var checks=list.Items.Cast<ListViewItem>().ToDictionary(row=>row.Name,row=>row.Checked);
                 list.Items.Clear(); Entry[] entries=engine.Inventory();
                 foreach(Entry e in entries){ListViewItem row=new ListViewItem(e.game);row.Name=e.requestedDatabase;row.Tag=e;row.StateImageIndex=0;row.Checked=checks.ContainsKey(row.Name) && checks[row.Name];row.SubItems.Add(e.database);row.SubItems.Add(DisplayStatus(e.status));row.SubItems.Add(BackupText(e));row.ToolTipText=e.detail??e.backup??BackupText(e);list.Items.Add(row);}
@@ -1357,6 +1417,7 @@ namespace ITDatabaseSetup
                 try{
                     Connection connection=new Connection {server=server.Text.Trim(),port=(int)port.Value,username=user.Text.Trim(),pgBin=Engine.DetectTools(pgBin.Text.Trim())};
                     string secret=password.Text;
+                    if(!PersistPassword())return false;
                     entries=await Task.Run(()=>engine.CheckInstalledGames(connection,secret,entries));
                     secret=null;if(IsDisposed)return false;
                     int present=0;
@@ -1491,6 +1552,7 @@ namespace ITDatabaseSetup
                 string root=AppDomain.CurrentDomain.BaseDirectory;
                 for(int i=0;i<args.Length;i++)if(args[i]=="--root" && i+1<args.Length)root=args[++i];
                 Engine engine=new Engine(root);
+                if(args.Contains("--migrate-settings")){Console.WriteLine("Connection settings are stored in UserSettings.json; DatabaseInfo.json contains the database list.");return 0;}
                 int loadFiles=Array.IndexOf(args,"--auto-load-files");
                 if(loadFiles>=0){if(loadFiles+1>=args.Length)throw new Exception("Use --auto-load-files GAMES_FOLDER.");Console.WriteLine(Engine.Json.Serialize(engine.AutoLoadDatabaseFiles(args[loadFiles+1])));return 0;}
                 if(args.Contains("--prepare-backup-folders")){engine.PrepareBackupFolders();Console.WriteLine("Game database file folders are ready inside PG_backup.");return 0;}

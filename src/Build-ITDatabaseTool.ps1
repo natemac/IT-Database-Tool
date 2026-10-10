@@ -15,18 +15,15 @@ foreach ($name in @('README.txt','CREDITS.txt','Setup-ITDatabases.ps1')) {
 $packageRoot=Join-Path $toolRoot 'output'
 [IO.Directory]::CreateDirectory($packageRoot) | Out-Null
 $definition=Join-Path $destination 'DatabaseInfo.json'
-if(!(Test-Path -LiteralPath $definition)){
-    & (Join-Path $destination 'IT Database Builder.exe') --inventory --root $destination | Out-Null
-    if($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $definition)){throw 'DatabaseInfo.json is missing and legacy TXT import failed.'}
-}
+$migration=Start-Process -FilePath (Join-Path $destination 'IT Database Builder.exe') -ArgumentList '--migrate-settings' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $packageRoot 'settings-migration.stdout.txt') -RedirectStandardError (Join-Path $packageRoot 'settings-migration.stderr.txt')
+if($migration.ExitCode -ne 0 -or !(Test-Path -LiteralPath $definition)){throw 'Settings migration failed. See output/settings-migration.stderr.txt; existing settings were preserved.'}
 $stage=Join-Path $packageRoot ('package-'+[Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($stage) | Out-Null
 foreach($name in @('IT Database Builder.exe','README.txt','CREDITS.txt','Setup-ITDatabases.ps1')) {Copy-Item -LiteralPath (Join-Path $destination $name) -Destination (Join-Path $stage $name)}
 $shareableDefinition=Get-Content -LiteralPath $definition -Raw | ConvertFrom-Json
-$shareableDefinition.connection.server='127.0.0.1'
-$shareableDefinition.connection.port=5432
-$shareableDefinition.connection.pgBin=$null
-$shareableDefinition.connection.password=''
+$shareableDefinition.PSObject.Properties.Remove('connection')
+# UserSettings.json is created with blank defaults on first run. Never bundle
+# it: extracting an update must not replace a user's connection or preferences.
 foreach($game in $shareableDefinition.games) { $game | Add-Member -NotePropertyName databaseFile -NotePropertyValue $null -Force }
 $packageJson=$shareableDefinition | ConvertTo-Json -Depth 20
 [IO.File]::WriteAllText((Join-Path $stage 'DatabaseInfo.json'),$packageJson,[Text.UTF8Encoding]::new($false))

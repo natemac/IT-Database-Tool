@@ -37,7 +37,7 @@ def main():
     password_fixture=fixture/'password-settings'
     password_fixture.mkdir()
     password_definition=json.loads(json.dumps(source))
-    password_definition['connection']['password']=''
+    password_definition.pop('connection',None)
     (password_fixture/'DatabaseInfo.json').write_text(json.dumps(password_definition),encoding='utf-8')
     compiler=Path(os.environ['WINDIR'])/'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     probe=fixture/'SetupGuidanceTest.exe'
@@ -45,7 +45,7 @@ def main():
                     '/reference:'+str(EXE),'/out:'+str(probe),str(ROOT/'src/test_setup_guidance.cs')],check=True,capture_output=True)
     guidance=subprocess.run([str(probe),str(fixture)],check=True,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
     print(guidance.stdout.decode('utf-8-sig').strip())
-    source['connection']['pgBin']=str(fixture/'missing-postgresql-tools')
+    source.pop('connection',None)
     (fixture/'DatabaseInfo.json').write_text(json.dumps(source),encoding='utf-8')
     missing=check(fixture,fixture/'missing-postgresql-tools')
     assert not missing['filesPresent'] and set(missing['missingFiles'])==set(FILES)
@@ -68,7 +68,7 @@ def main():
             assert hashlib.sha256(packed).digest()==hashlib.sha256((TOOL/'installs/PostgreSQL v8.3'/name).read_bytes()).digest()
         definition=json.loads(archive.read('DatabaseInfo.json').decode('utf-8-sig'))
         original=json.loads((TOOL/'DatabaseInfo.json').read_text(encoding='utf-8-sig'))
-        assert definition['connection']['password']==''
+        assert 'connection' not in definition, 'Shared catalogue must not contain local connection settings'
         expected_games=[dict(game, databaseFile=None) for game in original['games']]
         assert definition['games']==expected_games
         readme=archive.read('README.txt').decode('utf-8-sig')
@@ -78,7 +78,7 @@ def main():
         assert len(readme.splitlines())<=80
         assert readme==(TOOL/'README.txt').read_text(encoding='utf-8-sig')
         assert hashlib.sha256(archive.read('IT Database Builder.exe')).digest()==hashlib.sha256(EXE.read_bytes()).digest()
-    print(json.dumps({'passed':True,'installer_launched':False,'checks':['complete, missing and incomplete installer bundles detected','literal paths, elevated launch and hidden helper configured','all four installer files included unchanged in ZIP','shared ZIP starts with a blank password; game definitions preserved','README has '+str(len(readme.splitlines()))+' lines','guide author and GitHub credits included in ZIP','ZIP contains current compiled app']},indent=2))
+    print(json.dumps({'passed':True,'installer_launched':False,'checks':['complete, missing and incomplete installer bundles detected','literal paths, elevated launch and hidden helper configured','all four installer files included unchanged in ZIP','shared ZIP omits UserSettings and catalogue connection; fresh settings default to a blank password','legacy settings migration, user precedence, independent catalogue updates and malformed-file preservation','README has '+str(len(readme.splitlines()))+' lines','guide author and GitHub credits included in ZIP','ZIP contains current compiled app']},indent=2))
 
 
 if __name__=='__main__':

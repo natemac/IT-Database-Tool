@@ -1,12 +1,5 @@
 {
   "schemaVersion": 1,
-  "connection": {
-    "server": "127.0.0.1",
-    "port": 5432,
-    "username": "postgres",
-    "password": "",
-    "pgBin": null
-  },
   "games": [
     {
       "game": "Golden Tee Live 2006",

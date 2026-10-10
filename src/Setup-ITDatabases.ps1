@@ -1,4 +1,4 @@
-# Optional wrapper. DatabaseInfo.json is the sole persistent definition.
+# Optional wrapper. DatabaseInfo.json holds games; UserSettings.json holds the connection.
 [CmdletBinding()]
 param([string]$ToolRoot,[switch]$Plan,[switch]$ListBackups,[switch]$PromptWithWindow)
 $ErrorActionPreference='Stop'

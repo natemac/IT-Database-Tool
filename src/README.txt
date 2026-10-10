@@ -1,4 +1,4 @@
-IT DATABASE BUILDER
+﻿IT DATABASE BUILDER
 
 GET STARTED
 1. Extract the entire ZIP into a folder on your computer.
@@ -56,11 +56,13 @@ Reload checks databases and files again. Password changes keep your selections.
 ADD OR EDIT A GAME
 Use Add game or select a row and click Edit game.
 Changes are saved in DatabaseInfo.json. Use Choose file to select its database file.
-JSON contains the game list and your saved database password.
+DatabaseInfo.json contains the database list and selected archive locations.
+UserSettings.json keeps your connection, password and welcome preference locally.
 Keep the supplied encoding settings when using original game database files.
 The app detects and fixes the known IT category key mismatch during restore.
 Password starts blank. Enter your PostgreSQL password; edits save automatically.
 The saved password fills the editable field next time you open the app.
+Older connection settings move automatically; existing user settings take priority.
 
 CHECK THE RESULTS
 Green: Installed. Green with an original file: Installed or clean install.
@@ -72,6 +74,6 @@ Failed installs leave the game database absent; correct the error and retry Inst
 Use Clean install to repair it, or Remove and then Install to start over.
 
 SHARE THE TOOL
-Share IT-Database-Setup.zip. It includes the app, JSON with a blank password,
-this README, the database file folders, and the PostgreSQL installer.
+Share IT-Database-Setup.zip. It excludes UserSettings.json and starts passwords blank.
+Updates preserve your settings; keep your database list if you customized it.
 Each user supplies their own game database files. Files and reports are not included.

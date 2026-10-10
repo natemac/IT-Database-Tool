@@ -29,11 +29,11 @@ Game database files are not included. The app uses files where you select them, 
 
 **Install** skips existing databases. **Clean install** requires confirmation and keeps the previous database as a recovery database. **Remove** requires confirmation and deletes the selected installed databases.
 
-Your database password is saved in your local `DatabaseInfo.json`. Downloads start with a blank password. Keep your local settings private.
+Your database connection and password are saved locally in `UserSettings.json`. New users start with a blank password. This private settings file is never included in downloads; keep your own copy private.
 
 ## Database list
 
-`DatabaseInfo.json` is the editable game list. Use **Open Database List**, **Add game**, or **Edit game** in the app to maintain it.
+`DatabaseInfo.json` is the editable game list. Use **Open Database List**, **Add game**, or **Edit game** in the app to maintain it. Updating this list leaves your connection and preferences in `UserSettings.json` unchanged. Install the matching updated app when upgrading from v1.0.0; existing connection fields migrate automatically. Updating this list leaves your connection and preferences in `UserSettings.json` unchanged. Install the matching updated app when upgrading from v1.0.0; existing connection fields migrate automatically.
 
 The download includes the PostgreSQL 8.3 / pgAdmin III installer. PostgreSQL 8.3 is a legacy version for these games.
 

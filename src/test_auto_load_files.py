@@ -121,13 +121,18 @@ def main():
             assert states[database]['status'] in ('Not found', 'Choose file'), states[database]
     for database in ('GameDB19', 'GameDB20', 'GameDBUnclearA', 'GameDBUnclearB'):
         assert states[database]['status'] == 'Choose file'
-    assert updated['connection'] == definition['connection']
+    assert 'connection' not in updated, 'Database catalogue must not retain local connection settings'
+    settings_path = tool / 'UserSettings.json'
+    settings = json.loads(settings_path.read_text(encoding='utf-8-sig'))
+    assert settings['connection'] == definition['connection']
+    settings_before = settings_path.read_bytes()
     assert not first['error'] and not first['canceled']
     assert Path(first['reportPath']).is_file()
     assert not list(tool.rglob('*.loading'))
     for path, sha in originals.items():
         assert digest(path.read_bytes()) == sha
     second = run(tool, sources)
+    assert settings_path.read_bytes() == settings_before, 'File discovery must preserve user settings'
     assert sum(entry['status'] == 'Already available' for entry in second['entries']) == len(expected)
     assert not any(entry['status'] == 'Loaded' for entry in second['entries'])
     assert not (tool/'PG_backup').exists(), 'Discovery must not copy files or create folders'
